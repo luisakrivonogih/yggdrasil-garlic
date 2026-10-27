@@ -42,9 +42,11 @@ func (l *links) newLinkQUIC() *linkQUIC {
 		links:     l,
 		tlsconfig: l.core.config.tls.Clone(),
 		quicconfig: &quic.Config{
-			MaxIdleTimeout:  time.Minute,
-			KeepAlivePeriod: time.Second * 20,
-			TokenStore:      quic.NewLRUTokenStore(255, 255),
+			MaxIdleTimeout:        time.Minute,
+			KeepAlivePeriod:       time.Second * 20,
+			TokenStore:            quic.NewLRUTokenStore(255, 255),
+			MaxIncomingStreams:    1,
+			MaxIncomingUniStreams: -1,
 		},
 	}
 	return lt
@@ -56,8 +58,11 @@ func (l *linkQUIC) dial(ctx context.Context, url *url.URL, info linkInfo, option
 		tlsconfig.ServerName = hostname
 		tlsconfig.MinVersion = tls.VersionTLS12
 		tlsconfig.MaxVersion = tls.VersionTLS13
+		if sni := options.tlsSNI; sni != "" {
+			tlsconfig.ServerName = sni
+		}
 		hostport := net.JoinHostPort(ip.String(), fmt.Sprintf("%d", port))
-		qc, err := quic.DialAddr(ctx, hostport, l.tlsconfig, l.quicconfig)
+		qc, err := quic.DialAddr(ctx, hostport, tlsconfig, l.quicconfig)
 		if err != nil {
 			return nil, err
 		}
@@ -92,17 +97,27 @@ func (l *linkQUIC) listen(ctx context.Context, url *url.URL, _ string) (net.List
 			case quic.ErrServerClosed:
 				return
 			case nil:
-				qs, err := qc.AcceptStream(ctx)
-				if err != nil {
-					_ = qc.CloseWithError(1, fmt.Sprintf("stream error: %s", err))
-					continue
-				}
-				ch <- &linkQUICStream{
-					Conn:   qc,
-					Stream: qs,
-				}
+				go l.waitForStream(ctx, qc, ch)
 			}
 		}
 	}()
 	return lql, nil
+}
+
+func (l *linkQUIC) waitForStream(ctx context.Context, qc *quic.Conn, ch chan *linkQUICStream) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	qs, err := qc.AcceptStream(ctx)
+	if err != nil {
+		_ = qc.CloseWithError(1, fmt.Sprintf("stream error: %s", err))
+		return
+	}
+	select {
+	case ch <- &linkQUICStream{
+		Conn:   qc,
+		Stream: qs,
+	}:
+	case <-ctx.Done():
+		_ = qc.CloseWithError(1, "stream not created")
+	}
 }

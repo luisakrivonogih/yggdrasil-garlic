@@ -54,7 +54,7 @@ type NodeConfig struct {
 	IfMTU               uint64                     `comment:"Maximum Transmission Unit (MTU) size for your local TUN interface.\nDefault is the largest supported size for your platform. The lowest\npossible value is 1280."`
 	LogLookups          bool                       `json:",omitempty"`
 	NodeInfoPrivacy     bool                       `comment:"By default, nodeinfo contains some defaults including the platform,\narchitecture and Yggdrasil version. These can help when surveying\nthe network and diagnosing network routing problems. Enabling\nnodeinfo privacy prevents this, so that only items specified in\n\"NodeInfo\" are sent back if specified."`
-	NodeInfo            map[string]interface{}     `comment:"Optional nodeinfo. This must be a { \"key\": \"value\", ... } map\nor set as null. This is entirely optional but, if set, is visible\nto the whole network on request."`
+	NodeInfo            map[string]any             `comment:"Optional nodeinfo. This must be a { \"key\": \"value\", ... } map\nor set as null. This is entirely optional but, if set, is visible\nto the whole network on request."`
 	Garlic              GarlicConfig               `comment:"Configuration for the experimental Garlic Routing Overlay, an optional\nprivacy-enhanced routing layer built on top of Yggdrasil - see\ndocs/garlic-architecture.md. When Enabled is false (the default),\nbehavior is identical to a node with no Garlic support at all."`
 	Dashboard           DashboardConfig            `comment:"Configuration for the local operator dashboard - a web UI and\nread-only API showing this node's live status, traffic, peers, and\n(if enabled) Garlic circuits. Disabled by default. When enabled, the\nlistener should stay loopback-only - the dashboard and its API have\nno authentication of their own."`
 }
@@ -231,7 +231,13 @@ func (cfg *NodeConfig) postprocessConfig() error {
 			return err
 		}
 	}
+	pkl := len(cfg.PrivateKey)
 	switch {
+	case pkl > 0 && pkl != ed25519.PrivateKeySize:
+		return fmt.Errorf("invalid private key length")
+	case pkl == 0:
+		cfg.NewPrivateKey()
+		fallthrough
 	case cfg.Certificate == nil:
 		// No self-signed certificate has been generated yet.
 		fallthrough

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"runtime"
 	"time"
 
@@ -71,18 +72,16 @@ func (m *nodeinfo) _getNodeInfo() json.RawMessage {
 }
 
 // Set the current node's nodeinfo
-func (m *nodeinfo) setNodeInfo(given map[string]interface{}, privacy bool) (err error) {
+func (m *nodeinfo) setNodeInfo(given map[string]any, privacy bool) (err error) {
 	phony.Block(m, func() {
 		err = m._setNodeInfo(given, privacy)
 	})
 	return
 }
 
-func (m *nodeinfo) _setNodeInfo(given map[string]interface{}, privacy bool) error {
-	newnodeinfo := make(map[string]interface{}, len(given))
-	for k, v := range given {
-		newnodeinfo[k] = v
-	}
+func (m *nodeinfo) _setNodeInfo(given map[string]any, privacy bool) error {
+	newnodeinfo := make(map[string]any, len(given))
+	maps.Copy(newnodeinfo, given)
 	if !privacy {
 		newnodeinfo["buildname"] = version.BuildName()
 		newnodeinfo["buildversion"] = version.BuildVersion()
@@ -138,13 +137,13 @@ type GetNodeInfoRequest struct {
 }
 type GetNodeInfoResponse map[string]json.RawMessage
 
-func (m *nodeinfo) nodeInfoAdminHandler(in json.RawMessage) (interface{}, error) {
+func (m *nodeinfo) nodeInfoAdminHandler(in json.RawMessage) (any, error) {
 	var req GetNodeInfoRequest
 	if err := json.Unmarshal(in, &req); err != nil {
 		return nil, err
 	}
-	if req.Key == "" {
-		return nil, fmt.Errorf("no remote public key supplied")
+	if self := hex.EncodeToString(m.proto.core.PublicKey()); req.Key == self || req.Key == "" {
+		return GetNodeInfoResponse{self: m.myNodeInfo}, nil
 	}
 	var key keyArray
 	var kbs []byte

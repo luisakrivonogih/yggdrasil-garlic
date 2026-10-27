@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/Arceliar/phony"
 	"github.com/coder/websocket"
@@ -36,6 +37,9 @@ func (l *linkWSS) dial(ctx context.Context, url *url.URL, info linkInfo, options
 		tlsconfig.ServerName = hostname
 		tlsconfig.MinVersion = tls.VersionTLS12
 		tlsconfig.MaxVersion = tls.VersionTLS13
+		if sni := options.tlsSNI; sni != "" {
+			tlsconfig.ServerName = sni
+		}
 		u := *url
 		u.Host = net.JoinHostPort(ip.String(), fmt.Sprintf("%d", port))
 		addr := &net.TCPAddr{
@@ -46,14 +50,19 @@ func (l *linkWSS) dial(ctx context.Context, url *url.URL, info linkInfo, options
 		if err != nil {
 			return nil, err
 		}
+		transport := &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			Dial:                  dialer.Dial, // nolint:staticcheck
+			DialContext:           dialer.DialContext,
+			DisableKeepAlives:     true,
+			ResponseHeaderTimeout: 5 * time.Second,
+			TLSClientConfig:       tlsconfig,
+			TLSHandshakeTimeout:   5 * time.Second,
+		}
+		defer transport.CloseIdleConnections()
 		wsconn, _, err := websocket.Dial(ctx, u.String(), &websocket.DialOptions{
 			HTTPClient: &http.Client{
-				Transport: &http.Transport{
-					Proxy:           http.ProxyFromEnvironment,
-					Dial:            dialer.Dial,
-					DialContext:     dialer.DialContext,
-					TLSClientConfig: tlsconfig,
-				},
+				Transport: transport,
 			},
 			Subprotocols: []string{"ygg-ws"},
 			Host:         hostname,

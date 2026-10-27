@@ -275,10 +275,7 @@ func (l *links) add(u *url.URL, sintf string, linkType linkType) error {
 			if backoff < 0 {
 				timeout = make(chan time.Time)
 			} else {
-				duration := time.Second << backoff
-				if duration > options.maxBackoff {
-					duration = options.maxBackoff
-				}
+				duration := min(time.Second<<backoff, options.maxBackoff)
 				timeout = time.After(duration)
 			}
 			select {
@@ -444,7 +441,6 @@ func (l *links) remove(u *url.URL, sintf string, _ linkType) error {
 }
 
 func (l *links) listen(u *url.URL, sintf string, local bool) (*Listener, error) {
-	ctx, ctxcancel := context.WithCancel(l.core.ctx)
 	var protocol linkProtocol
 	switch strings.ToLower(u.Scheme) {
 	case "tcp":
@@ -460,9 +456,23 @@ func (l *links) listen(u *url.URL, sintf string, local bool) (*Listener, error) 
 	case "wss":
 		protocol = l.wss
 	default:
-		ctxcancel()
 		return nil, ErrLinkUnrecognisedSchema
 	}
+	var options linkOptions
+	if p := u.Query().Get("priority"); p != "" {
+		pi, err := strconv.ParseUint(p, 10, 8)
+		if err != nil {
+			return nil, ErrLinkPriorityInvalid
+		}
+		options.priority = uint8(pi)
+	}
+	if p := u.Query().Get("password"); p != "" {
+		if len(p) > blake2b.Size {
+			return nil, ErrLinkPasswordInvalid
+		}
+		options.password = []byte(p)
+	}
+	ctx, ctxcancel := context.WithCancel(l.core.ctx)
 	listener, err := protocol.listen(ctx, u, sintf)
 	if err != nil {
 		ctxcancel()
@@ -479,21 +489,6 @@ func (l *links) listen(u *url.URL, sintf string, local bool) (*Listener, error) 
 		listener: listener,
 		ctx:      ctx,
 		Cancel:   cancel,
-	}
-
-	var options linkOptions
-	if p := u.Query().Get("priority"); p != "" {
-		pi, err := strconv.ParseUint(p, 10, 8)
-		if err != nil {
-			return nil, ErrLinkPriorityInvalid
-		}
-		options.priority = uint8(pi)
-	}
-	if p := u.Query().Get("password"); p != "" {
-		if len(p) > blake2b.Size {
-			return nil, ErrLinkPasswordInvalid
-		}
-		options.password = []byte(p)
 	}
 
 	phony.Block(l, func() {
@@ -695,10 +690,7 @@ func (l *links) handler(linkType linkType, options linkOptions, conn net.Conn, s
 	remoteAddr := net.IP(address.AddrForKey(meta.publicKey)[:]).String()
 	remoteStr := fmt.Sprintf("%s@%s", remoteAddr, conn.RemoteAddr())
 	localStr := conn.LocalAddr()
-	priority := options.priority
-	if meta.priority > priority {
-		priority = meta.priority
-	}
+	priority := max(meta.priority, options.priority)
 	l.core.log.Infof("Connected %s: %s, source %s",
 		dir, remoteStr, localStr)
 	if success != nil {

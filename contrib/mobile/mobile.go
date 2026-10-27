@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net"
 	"regexp"
+	"runtime/debug"
 
 	"github.com/gologme/log"
 
@@ -41,7 +42,7 @@ func (m *Yggdrasil) StartAutoconfigure() error {
 // StartJSON starts a node with the given JSON config. You can get JSON config
 // (rather than HJSON) by using the GenerateConfigJSON() function
 func (m *Yggdrasil) StartJSON(configjson []byte) error {
-	setMemLimitIfPossible()
+	debug.SetMemoryLimit(1024 * 1024 * 40)
 
 	logger := log.New(m.log, "", 0)
 	logger.EnableLevel("error")
@@ -59,12 +60,17 @@ func (m *Yggdrasil) StartJSON(configjson []byte) error {
 			Mask: net.CIDRMask(7, 128),
 		}
 		options := []core.SetupOption{
+			core.NodeInfo(m.config.NodeInfo),
+			core.NodeInfoPrivacy(m.config.NodeInfoPrivacy),
 			core.PeerFilter(func(ip net.IP) bool {
 				return !iprange.Contains(ip)
 			}),
 		}
 		for _, peer := range m.config.Peers {
 			options = append(options, core.Peer{URI: peer})
+		}
+		if m.config.GroupPassword != "" {
+			options = append(options, core.GroupPassword(m.config.GroupPassword))
 		}
 		for intf, peers := range m.config.InterfacePeers {
 			for _, peer := range peers {

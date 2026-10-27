@@ -1,13 +1,15 @@
 package admin
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
-	"sort"
+	"slices"
 
 	"strings"
 	"time"
@@ -136,7 +138,7 @@ func New(c *core.Core, log core.Logger, opts ...SetupOption) (*AdminSocket, erro
 		strings.ToUpper(a.listener.Addr().Network()),
 		a.listener.Addr().String())
 
-	_ = a.AddHandler("list", "List available commands", []string{}, func(_ json.RawMessage) (interface{}, error) {
+	_ = a.AddHandler("list", "List available commands", []string{}, func(_ json.RawMessage) (any, error) {
 		res := &ListResponse{}
 		for name, handler := range a.handlers {
 			res.List = append(res.List, ListEntry{
@@ -145,8 +147,8 @@ func New(c *core.Core, log core.Logger, opts ...SetupOption) (*AdminSocket, erro
 				Fields:      handler.args,
 			})
 		}
-		sort.SliceStable(res.List, func(i, j int) bool {
-			return strings.Compare(res.List[i].Command, res.List[j].Command) < 0
+		slices.SortStableFunc(res.List, func(i, j ListEntry) int {
+			return strings.Compare(i.Command, j.Command)
 		})
 		return res, nil
 	})
@@ -158,7 +160,7 @@ func New(c *core.Core, log core.Logger, opts ...SetupOption) (*AdminSocket, erro
 func (a *AdminSocket) SetupAdminHandlers() {
 	_ = a.AddHandler(
 		"getSelf", "Show details about this node", []string{},
-		func(in json.RawMessage) (interface{}, error) {
+		func(in json.RawMessage) (any, error) {
 			req := &GetSelfRequest{}
 			res := &GetSelfResponse{}
 			if err := json.Unmarshal(in, &req); err != nil {
@@ -172,7 +174,7 @@ func (a *AdminSocket) SetupAdminHandlers() {
 	)
 	_ = a.AddHandler(
 		"getPeers", "Show directly connected peers", []string{"sort"},
-		func(in json.RawMessage) (interface{}, error) {
+		func(in json.RawMessage) (any, error) {
 			req := &GetPeersRequest{}
 			res := &GetPeersResponse{}
 			if err := json.Unmarshal(in, &req); err != nil {
@@ -186,7 +188,7 @@ func (a *AdminSocket) SetupAdminHandlers() {
 	)
 	_ = a.AddHandler(
 		"getTree", "Show known Tree entries", []string{},
-		func(in json.RawMessage) (interface{}, error) {
+		func(in json.RawMessage) (any, error) {
 			req := &GetTreeRequest{}
 			res := &GetTreeResponse{}
 			if err := json.Unmarshal(in, &req); err != nil {
@@ -200,7 +202,7 @@ func (a *AdminSocket) SetupAdminHandlers() {
 	)
 	_ = a.AddHandler(
 		"getPaths", "Show established paths through this node", []string{},
-		func(in json.RawMessage) (interface{}, error) {
+		func(in json.RawMessage) (any, error) {
 			req := &GetPathsRequest{}
 			res := &GetPathsResponse{}
 			if err := json.Unmarshal(in, &req); err != nil {
@@ -214,7 +216,7 @@ func (a *AdminSocket) SetupAdminHandlers() {
 	)
 	_ = a.AddHandler(
 		"getSessions", "Show established traffic sessions with remote nodes", []string{},
-		func(in json.RawMessage) (interface{}, error) {
+		func(in json.RawMessage) (any, error) {
 			req := &GetSessionsRequest{}
 			res := &GetSessionsResponse{}
 			if err := json.Unmarshal(in, &req); err != nil {
@@ -228,7 +230,7 @@ func (a *AdminSocket) SetupAdminHandlers() {
 	)
 	_ = a.AddHandler(
 		"addPeer", "Add a peer to the peer list", []string{"uri", "interface"},
-		func(in json.RawMessage) (interface{}, error) {
+		func(in json.RawMessage) (any, error) {
 			req := &AddPeerRequest{}
 			res := &AddPeerResponse{}
 			if err := json.Unmarshal(in, &req); err != nil {
@@ -242,7 +244,7 @@ func (a *AdminSocket) SetupAdminHandlers() {
 	)
 	_ = a.AddHandler(
 		"removePeer", "Remove a peer from the peer list", []string{"uri", "interface"},
-		func(in json.RawMessage) (interface{}, error) {
+		func(in json.RawMessage) (any, error) {
 			req := &RemovePeerRequest{}
 			res := &RemovePeerResponse{}
 			if err := json.Unmarshal(in, &req); err != nil {
@@ -305,7 +307,7 @@ func (a *AdminSocket) listen() {
 
 // handleRequest calls the request handler for each request sent to the admin API.
 func (a *AdminSocket) handleRequest(conn net.Conn) {
-	decoder := json.NewDecoder(conn)
+	decoder := json.NewDecoder(io.LimitReader(conn, 1024*1024)) // 1MB
 	decoder.DisallowUnknownFields()
 
 	encoder := json.NewEncoder(conn)
@@ -320,8 +322,14 @@ func (a *AdminSocket) handleRequest(conn net.Conn) {
 		var resp AdminSocketResponse
 		req.Arguments = []byte("{}")
 		if err := func() error {
+			if err = conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+				return fmt.Errorf("failed to set read deadline: %w", err)
+			}
 			if err = decoder.Decode(&buf); err != nil {
-				return fmt.Errorf("failed to find request")
+				return fmt.Errorf("failed to decode request: %w", err)
+			}
+			if err = conn.SetReadDeadline(time.Time{}); err != nil {
+				return fmt.Errorf("failed to reset read deadline: %w", err)
 			}
 			if err = json.Unmarshal(buf, &req); err != nil {
 				return fmt.Errorf("failed to unmarshal request")
@@ -334,6 +342,9 @@ func (a *AdminSocket) handleRequest(conn net.Conn) {
 			handler, ok := a.handlers[reqname]
 			if !ok {
 				return fmt.Errorf("unknown action '%s', try 'list' for help", reqname)
+			}
+			if bytes.Equal(bytes.TrimSpace(req.Arguments), []byte("null")) {
+				req.Arguments = json.RawMessage("{}")
 			}
 			res, err := handler.handler(req.Arguments)
 			if err != nil {
