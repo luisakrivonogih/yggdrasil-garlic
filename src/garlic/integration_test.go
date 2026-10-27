@@ -38,6 +38,9 @@ func newLinkedTestNode(t *testing.T) *core.Core {
 		t.Fatalf("GenerateSelfSignedCertificate returned error: %v", err)
 	}
 	logger := log.New(io.Discard, "", 0)
+	// gologme/log lazily writes this field on its first Output call. Set
+	// it before the core starts concurrent listeners and connection logs.
+	logger.SetCallDepth(2)
 	c, err := core.New(cfg.Certificate, logger)
 	if err != nil {
 		t.Fatalf("core.New returned error: %v", err)

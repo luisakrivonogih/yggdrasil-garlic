@@ -50,6 +50,13 @@ identity and stats so you can confirm it actually started. See
 [docs/garlic-testing.md](docs/garlic-testing.md) for how to build a circuit
 and send traffic through it once the service is running.
 
+Garlic websites have automatic `<hash>.domains.yggg` addresses, a distributed
+signed directory and an HTTP browser proxy at `127.0.0.1:4444`. Configure
+the browser with `http://127.0.0.1:4444/proxy.pac`, then open a site's
+`http://<hash>.domains.yggg/` URL. See
+[Garlic websites](docs/garlic-sites.md) for hosting and browser setup, and
+[hash domains](docs/garlic-domains.md) for the naming API.
+
 ## Supported Platforms
 
 Yggdrasil works on a number of platforms, including Linux, macOS, Ubiquiti

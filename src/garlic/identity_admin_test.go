@@ -28,7 +28,10 @@ func TestIdentityResponseIncludesSigningPublicKey(t *testing.T) {
 	if resp["signingPublicKey"] != wantSigningPublicKey {
 		t.Errorf("signingPublicKey = %q, want %q", resp["signingPublicKey"], wantSigningPublicKey)
 	}
-	if len(resp) != 2 {
-		t.Errorf("identityResponse() has %d fields, want 2: %+v", len(resp), resp)
+	if want := ComputeGID(id.SigningPublicKey, nil).Domain(); resp["domain"] != want {
+		t.Errorf("domain = %q, want %q", resp["domain"], want)
+	}
+	if len(resp) != 3 {
+		t.Errorf("identityResponse() has %d fields, want 3: %+v", len(resp), resp)
 	}
 }

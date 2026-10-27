@@ -21,9 +21,55 @@ import (
 // SetupAdminHandlers registers this Garlic instance's admin socket
 // handlers, reachable via yggdrasilctl.
 func (g *Garlic) SetupAdminHandlers(a *admin.AdminSocket) {
-	_ = a.AddHandler("getGarlicIdentity", "Show this node's Garlic identity public key and signing public key", []string{},
+	_ = a.AddHandler("getGarlicServices", "Show hosted website domains, publication status and last publication error", []string{}, func(in json.RawMessage) (interface{}, error) {
+		return map[string]interface{}{"services": g.HostedServices()}, nil
+	})
+	_ = a.AddHandler("getGarlicIdentity", "Show this node's Garlic public keys and default hash domain", []string{},
 		func(in json.RawMessage) (interface{}, error) {
 			return g.identityResponse(), nil
+		})
+
+	_ = a.AddHandler("getGarlicDomain", "Get this identity's hash.domains.yggg address without publishing; serviceId is optional hex (empty for the default service)", []string{"[serviceId]"},
+		func(in json.RawMessage) (interface{}, error) {
+			var req struct {
+				ServiceID string `json:"serviceId"`
+			}
+			if err := json.Unmarshal(in, &req); err != nil {
+				return nil, err
+			}
+			serviceID, err := hex.DecodeString(req.ServiceID)
+			if err != nil {
+				return nil, fmt.Errorf("invalid serviceId: %w", err)
+			}
+			if len(serviceID) > maxServiceIDSize {
+				return nil, ErrServiceIDTooLarge
+			}
+			gid := ComputeGID(g.identity.SigningPublicKey, serviceID)
+			return map[string]string{
+				"gid": gid.String(), "domain": gid.Domain(), "serviceId": hex.EncodeToString(serviceID),
+			}, nil
+		})
+
+	_ = a.AddHandler("resolveGarlicDomain", "Resolve a hash.domains.yggg address to verified introduction points in the configured rendezvous", []string{"domain"},
+		func(in json.RawMessage) (interface{}, error) {
+			var req struct {
+				Domain string `json:"domain"`
+			}
+			if err := json.Unmarshal(in, &req); err != nil {
+				return nil, err
+			}
+			points, err := g.LookupDomain(req.Domain)
+			if err != nil {
+				return nil, err
+			}
+			gid, _ := ParseDomain(req.Domain) // LookupDomain already validated it.
+			keys := make([]string, len(points))
+			for i, p := range points {
+				keys[i] = hex.EncodeToString(p.NodeKey)
+			}
+			return map[string]interface{}{
+				"gid": gid.String(), "domain": gid.Domain(), "introPoints": keys,
+			}, nil
 		})
 
 	_ = a.AddHandler("garlicQueryCapability", "Query whether a node supports Garlic and its public key", []string{"key"},
@@ -207,7 +253,7 @@ func (g *Garlic) SetupAdminHandlers(a *admin.AdminSocket) {
 			}, nil
 		})
 
-	_ = a.AddHandler("publishGarlicService", "Publish this node's identity at a set of introduction points", []string{"serviceId", "introPoints", "[ttlSeconds]"},
+	_ = a.AddHandler("publishGarlicService", "Publish a service at introduction points and return its GID and hash domain; serviceId is optional hex", []string{"[serviceId]", "introPoints", "[ttlSeconds]"},
 		func(in json.RawMessage) (interface{}, error) {
 			var req struct {
 				ServiceID   string `json:"serviceId"`
@@ -238,7 +284,7 @@ func (g *Garlic) SetupAdminHandlers(a *admin.AdminSocket) {
 			if err != nil {
 				return nil, err
 			}
-			return map[string]string{"gid": gid.String()}, nil
+			return map[string]string{"gid": gid.String(), "domain": gid.Domain()}, nil
 		})
 
 	_ = a.AddHandler("lookupGarlicService", "Look up the introduction points published for a GID", []string{"gid"},
@@ -490,13 +536,15 @@ func (g *Garlic) SetupAdminHandlers(a *admin.AdminSocket) {
 // identityResponse builds the getGarlicIdentity admin response: this
 // node's long-term X25519 identity public key (used for circuit-hop
 // ECDH) and its Ed25519 signing public key (used to sign service
-// descriptors, see docs/garlic-rendezvous.md), both hex-encoded. Split
+// descriptors, see docs/garlic-rendezvous.md), both hex-encoded, plus the
+// default service's hash domain (empty service ID). Split
 // out from the handler closure so it can be tested without a real
 // admin.AdminSocket.
 func (g *Garlic) identityResponse() map[string]string {
 	return map[string]string{
 		"publicKey":        hex.EncodeToString(g.identity.PublicKey),
 		"signingPublicKey": hex.EncodeToString(g.identity.SigningPublicKey),
+		"domain":           ComputeGID(g.identity.SigningPublicKey, nil).Domain(),
 	}
 }
 

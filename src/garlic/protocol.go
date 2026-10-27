@@ -35,6 +35,8 @@ const (
 	// msgTypeCircuitDataV3 is the auto-pool circuit wire type - see §8 of
 	// the same design doc and Task 6/7 of its implementation plan.
 	msgTypeCircuitDataV3
+	msgTypeDuplexData
+	msgTypeCircuitReply
 )
 
 // circuitDataMinSize is the minimum length of a circuitData message body
@@ -71,7 +73,9 @@ type circuitAction struct {
 	// packet - only actionDeliver consults it (see manager.go's
 	// dispatchAction/deliverTagged); forwarding already preserves the
 	// type byte directly in forwardMsg.
-	tagged bool
+	tagged        bool
+	replyKey      []byte
+	nextCircuitID CircuitID
 }
 
 // processCircuitData decides what to do with the body of a
@@ -118,7 +122,11 @@ func (g *Garlic) processCircuitData(body []byte, msgType byte) circuitAction {
 	case EnvelopeVersion1:
 		return g.processCircuitDataLegacy(secret, env, msgType)
 	case EnvelopeVersion2:
-		return g.processCircuitDataHopLocal(secret, env, msgType)
+		a := g.processCircuitDataHopLocal(secret, env, msgType)
+		if msgType == msgTypeDuplexData && a.kind != actionDrop {
+			a.replyKey, _ = deriveReplyKey(secret)
+		}
+		return a
 	default:
 		// Unreachable: Unmarshal already rejects any other Version.
 		g.security.malformedPackets.Add(1)
@@ -229,7 +237,7 @@ func (g *Garlic) processCircuitDataHopLocal(secret []byte, env *Envelope, msgTyp
 	forwardMsg = append(forwardMsg, msgType)
 	forwardMsg = append(forwardMsg, layer.NextHopEphemeral...)
 	forwardMsg = append(forwardMsg, nextBytes...)
-	return circuitAction{kind: actionForward, circuitID: circuitID, forwardTo: layer.NextHop, forwardMsg: forwardMsg}
+	return circuitAction{kind: actionForward, circuitID: circuitID, forwardTo: layer.NextHop, forwardMsg: forwardMsg, nextCircuitID: nextID}
 }
 
 // buildCircuitDataMessageHopLocal is buildCircuitDataMessage's
@@ -325,7 +333,7 @@ func (g *Garlic) processCircuitDataBundle(body []byte) []circuitAction {
 // node advertises in response to a capability request. It performs no I/O.
 func (g *Garlic) processCapabilityRequest() []byte {
 	msg := &CapabilityMessage{
-		Versions:  []string{CapabilityGarlicV2, CapabilityGarlicV3, CapabilityAutoCircuit},
+		Versions:  []string{CapabilityGarlicV2, CapabilityGarlicV3, CapabilityAutoCircuit, CapabilitySites},
 		PublicKey: g.identity.PublicKey,
 	}
 	// A fixed, well-formed message built from this node's own identity

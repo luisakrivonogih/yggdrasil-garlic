@@ -35,6 +35,13 @@ directory (`Rendezvous`) maps that GID to the service's current signed
 Garlic-capable relays willing to help establish contact with the
 service) among other fields.
 
+The same GID has an automatic DNS-shaped address,
+`<hash>.domains.yggg`, with a lowercase base32 first label.
+`Garlic.LookupDomain` parses this address and calls the same verified
+`LookupService` path. See [Garlic hash domains](garlic-domains.md) for the
+format and admin commands, and [Garlic websites](garlic-sites.md) for
+distributed discovery and browser access.
+
 ## Descriptor authentication
 
 `ServiceDescriptor` (`src/garlic/descriptor.go`):
@@ -95,9 +102,9 @@ attacks, only forgery). It cannot fabricate a descriptor for a GID it
 doesn't hold the signing key for, and it cannot tamper with a genuine
 descriptor's `IntroPoints` without invalidating the signature.
 
-## What's implemented: `StaticRendezvous`
+## `StaticRendezvous` for isolated tests
 
-`src/garlic/rendezvous.go`. An in-memory, TTL-expiring map, safe for
+`src/garlic/rendezvous.go`. An in-memory, unverified map, safe for
 concurrent use, capacity-bounded per publication
 (`MaxIntroPoints = 16`, so a single `Publish` call can't make the
 implementation store unbounded state). This is intentionally the
@@ -108,8 +115,7 @@ full `Garlic.PublishService`/`LookupService` API and the admin-socket
 independent of any distributed system, per the phased plan in
 `docs/garlic-architecture.md` §26.
 
-`StaticRendezvous` is what every test and the current `garlic.New`
-wiring in `cmd/yggdrasil/main.go` uses today. It has an obvious
+`StaticRendezvous` is explicitly selected by isolated tests. It has an obvious
 limitation as a real deployment mechanism: it only knows about
 publications made to *that specific node's own in-memory map* — it is
 not shared across the network. Two nodes each running `StaticRendezvous`
@@ -117,16 +123,17 @@ have no way to discover each other's published services unless something
 outside this project synchronizes their maps (e.g. a shared config file,
 or an out-of-band channel).
 
-## What's deliberately not implemented
+## `NetworkRendezvous` in the daemon
 
-A distributed rendezvous — a DHT, gossip protocol, or similar mechanism
-so `Publish`/`Lookup` calls actually reach other nodes over the network —
-is out of scope for this phase, per the original brief's explicit
-instruction not to build a "full global DHT" up front. The `Rendezvous`
-interface exists specifically so this can be added later as a second
-implementation with no change to anything that consumes it
-(`Garlic.PublishService`/`LookupService`, the admin handlers, or circuit
-construction).
+Passing nil to `garlic.New`, as the daemon now does, selects the
+distributed backend in `src/garlic/network_directory.go`. It uses
+iterative XOR-nearest lookups and up to three replicas, targeted RPCs
+inside Garlic circuits, verified signed descriptors, expiry, freshness
+checks and bounded storage. Direct mesh peers seed Garlic discovery and
+return bounded neighbor referrals. Website hosts refresh their records
+and placement automatically. No shared config or descriptor copying is
+required between a website and its clients. Full details and the privacy
+boundary are in [Garlic websites](garlic-sites.md).
 
 ## Threat-relevant properties of the interface itself
 
@@ -157,16 +164,11 @@ Independent of which implementation backs it:
   (of any kind) can still do is withhold, reorder, or serve a stale
   descriptor — availability and freshness are not solved by signing.
 
-## Future direction (not built)
+## Relation to the earlier DHT proposal
 
-A distributed `Rendezvous` implementation would most naturally reuse
-Yggdrasil's existing DHT machinery in ironwood rather than building a
-second one — GIDs and signed service descriptors are small, bounded
-records well-suited to a key-value DHT. This is noted as the intended
-next step, not designed in detail here; doing so properly requires its
-own threat-model pass (a distributed directory changes the "malicious
-introduction point" and "global passive adversary" analyses in
-`docs/garlic-threat-model.md` materially) before implementation begins.
-Descriptor authentication is orthogonal to this and would not need to be
-redesigned — a distributed backend is still just untrusted storage/relay
-from the verifying client's point of view.
+Ironwood supplies mesh routing rather than a public descriptor storage
+API. The implemented directory therefore routes its small bounded
+records and referral RPCs over that mesh through Garlic circuits. It
+preserves the existing `Rendezvous` interface and descriptor signatures.
+The added website section of `garlic-threat-model.md` describes directory
+exposure, relay exposure, Sybil/availability limitations and browser scope.

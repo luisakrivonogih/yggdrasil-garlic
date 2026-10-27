@@ -653,8 +653,56 @@ that opted into running this feature's code ever see
   uncooperative hop is currently only detected by the originator's own
   `SendGarlic`/timeout logic at the application layer, not a protocol
   message.
-- No reply/return-path mechanism — `RecvGarlic` delivers what arrives at
-  the terminal hop of someone else's circuit; there is no built-in way
-  for that node to talk back over the same circuit.
-- No distributed rendezvous wire protocol — see
-  `docs/garlic-rendezvous.md`.
+- The original `SendGarlic`/`RecvGarlic` API remains one-way. Websites use
+  the separate duplex wire types below.
+
+## 13. Websites and distributed directory (`garlic-sites-v1`)
+
+The additive capability gates every hop of a site circuit. Type 8
+(`msgTypeDuplexData`) carries the same hop-local forward body as type 3.
+After successful decryption, each hop stores its immediate previous/next
+node, incoming/child local IDs and an independently derived reply key.
+This bounded state expires after three minutes. Existing one-way and
+auto-pool traffic do not install return routes or enter the site queues.
+
+Type 9 (`msgTypeCircuitReply`) has `local_id[16] || counter[8] || ciphertext`.
+The reverse key is derived through `LabelCircuitEstablishHopLocal`, then
+`yggdrasil-garlic-hoplocal-data-reply-v1`. AEAD authenticates the local
+ID; each hop adds its own `counter || AEAD(inner)` layer and replaces the
+wire ID with its upstream leg's ID. Counters start independently at random
+and increment without reuse. The origin accepts only its first hop,
+authenticates every layer, then checks per-hop replay windows.
+
+Duplex terminal/reply payloads start with a site operation byte:
+
+| Byte | Operation | Body |
+| --- | --- | --- |
+| 1 | Register service | JSON signed descriptor and signature over domain separator, GID, relay node key and terminal local circuit ID |
+| 2 | Registration acknowledged | Empty |
+| 3 | Client packet | GID[33], client flow[16], flow secret[32], opaque QUIC packet |
+| 4 | Packet to host | GID[33], relay-chosen server flow[16], opaque QUIC packet |
+| 5 | Server packet | GID[33], server flow[16], opaque QUIC packet |
+| 6 | Packet to client | Client flow[16], opaque QUIC packet |
+| 7 | Directory request | Bounded JSON `directoryMessage` with nonce, GID and optional signed record to store |
+| 8 | Directory response | Same nonce/GID, optional signed record, bounded nearest-peer referrals and store acknowledgement |
+
+Operation bytes are internal to duplex payloads, not top-level wire types.
+Packets are capped at 8192 bytes; QUIC payloads at 2048 bytes. The relay
+checks registration signatures against the exact receiving circuit and
+its own key. Client flow secrets permit circuit replacement without
+allowing another origin to move a flow by guessing its public flow ID.
+Server packets are accepted only on the registered service circuit.
+Flows expire after two minutes of inactivity.
+
+QUIC runs over these virtual datagrams with ALPN `yggg-site-v1`. Its TLS
+certificate must be signed by the descriptor's Ed25519 service key, be
+valid for the hash domain and pass certificate validity checks. A stream
+starts with a big-endian virtual port (80 or 443); the host replies 1
+after connecting to the configured backend, or 0 on refusal. Remaining
+bytes are a reliable full-duplex application stream.
+
+Directory queries are iterative XOR-nearest lookups with bounded fanout,
+signed records, up to three replicas, expiry and freshness enforcement.
+They use operations 7/8 inside independent circuits; public DNS and the
+hosting node's address are not part of resolution. See
+[Garlic websites](garlic-sites.md) for limits and lifecycle details.

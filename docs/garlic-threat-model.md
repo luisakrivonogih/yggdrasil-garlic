@@ -580,3 +580,61 @@ before this pass (which had a delta of exactly 0, needing no anchoring
 observation at all to correlate every packet), but worth naming
 precisely rather than leaving a reader to assume this specific technique
 is fully closed.
+
+## Website transport and distributed directory
+
+The implemented website path is described in [Garlic websites](garlic-sites.md).
+It uses two outbound duplex circuits meeting at a relay, plus end-to-end
+QUIC/TLS. This supersedes the historical static inbound-tunnel proposal.
+
+The directory sees a GID and signed descriptor, including its signing key
+and relay node keys. It does not receive the hosting node's key or IPv6
+address. Directory RPCs arrive over Garlic circuits, so the server sees
+the preceding hop rather than a directly addressed publication from the
+host. This does not eliminate timing correlation, targeted withholding,
+stale-but-unexpired records, Sybil placement or eclipse attacks. XOR
+placement and replication provide neither consensus nor Sybil resistance.
+Bootstrap reachability and enough independent upgraded hops are required.
+All records are verified on storage and lookup, old publications cannot
+overwrite newer ones, and expired records are removed. Hosts republish
+after restarts and changes in the known directory population.
+
+The relay learns the GID and which two terminal circuit legs it bridges,
+their immediate previous hops, timings, packet sizes and traffic volumes.
+It can drop or delay packets. End-to-end TLS authenticates the service's
+signing key against the hash domain and protects application data from
+that relay. Registering a public descriptor also requires an ownership
+signature bound to the relay and exact terminal circuit ID. A copied
+descriptor cannot rebind the service to an attacker's circuit.
+
+Reverse circuit traffic has a separately derived key, hop-local IDs and
+independent counters at each leg. Every hop wraps a layer and the origin
+authenticates all layers before accepting replay counters. It verifies
+the immediate first-hop source. Return state is pinned to its authenticated
+neighbor/key mapping and expires; the configured hop count is never
+silently reduced. Existing timing, counter-delta, adjacent-hop, physical
+IP and small-anonymity-set limitations still apply. QUIC connection IDs
+and flow tokens are visible at the joining relay; this is not protection
+against a global observer or application/website fingerprinting.
+
+Input-driven state is bounded: 4096 directory records, 32 outstanding
+directory RPCs, four site workers with 256 queued events, 1024 relay
+registrations, 2048 relay flows, 64 local client transports, 64 hosted
+services, 64 accepted QUIC connections and 128 active streams per hosted
+service. QUIC receive windows, datagrams, referrals, lookup breadth,
+record lifetimes and return routing tables have independent bounds.
+Site packets use a separate 512 packets/second per-peer token bucket
+with a 1024-packet burst. These are resource controls, not a proof of
+resistance to sustained distributed flooding.
+
+The HTTP proxy accepts only loopback listeners and validated hash hosts;
+no unknown name is retried using public DNS or a direct TCP connection.
+Only fixed, operator-configured backend addresses on virtual ports 80/443
+can be reached. HTTP forwarding headers and cross-site Referer/Origin are
+removed; HTTP cookies become host-only because public browsers do not
+recognize `.domains.yggg` as a public suffix. HTTPS CONNECT is opaque and
+cannot enforce those HTTP header/cookie rules. The PAC sends ordinary
+Internet domains directly, so those destinations are outside Garlic.
+An ordinary browser's speculative networking, extensions, fingerprinting
+and storage isolation are not controlled by this code. No Tor Browser
+equivalence or claim of absolute anonymity is made.

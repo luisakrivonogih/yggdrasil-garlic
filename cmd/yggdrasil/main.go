@@ -26,6 +26,7 @@ import (
 	"github.com/yggdrasil-network/yggdrasil-go/src/admin"
 	"github.com/yggdrasil-network/yggdrasil-go/src/config"
 	"github.com/yggdrasil-network/yggdrasil-go/src/garlic"
+	"github.com/yggdrasil-network/yggdrasil-go/src/garlicproxy"
 	"github.com/yggdrasil-network/yggdrasil-go/src/ipv6rwc"
 
 	"github.com/yggdrasil-network/yggdrasil-go/src/core"
@@ -36,12 +37,13 @@ import (
 )
 
 type node struct {
-	core      *core.Core
-	tun       *tun.TunAdapter
-	multicast *multicast.Multicast
-	admin     *admin.AdminSocket
-	garlic    *garlic.Garlic
-	dashboard *dashboard.Process
+	core        *core.Core
+	tun         *tun.TunAdapter
+	multicast   *multicast.Multicast
+	admin       *admin.AdminSocket
+	garlic      *garlic.Garlic
+	garlicProxy *garlicproxy.Proxy
+	dashboard   *dashboard.Process
 }
 
 // The main function is responsible for configuring and starting Yggdrasil.
@@ -123,6 +125,14 @@ func main() {
 		_ = f.Close()
 
 	case *genconf:
+		// Generated files contain independent persistent Garlic secrets so
+		// enabling hosting later does not create a new domain on each boot.
+		identity, genErr := garlic.NewIdentity()
+		if genErr != nil {
+			panic(genErr)
+		}
+		cfg.Garlic.PrivateKey = identity.PrivateKey
+		cfg.Garlic.SigningPrivateKey = identity.SigningPrivateKey.Seed()
 		cfg.AdminListen = ""
 		var bs []byte
 		if *confjson {
@@ -316,6 +326,16 @@ func main() {
 					panic(err)
 				}
 				logger.Warnln("Garlic.PrivateKey configured but no Garlic.SigningPrivateKey - generated a fresh signing identity for this run only; your Garlic X25519 identity remains stable")
+			case len(cfg.Garlic.SigningPrivateKey) > 0:
+				_, privateKey, keyErr := garlic.GenerateKeypair()
+				if keyErr != nil {
+					panic(keyErr)
+				}
+				identity, err = garlic.LoadIdentityFromPrivateKeys(privateKey, cfg.Garlic.SigningPrivateKey)
+				if err != nil {
+					panic(err)
+				}
+				logger.Warnln("No Garlic.PrivateKey configured - generated an ephemeral X25519 key; the configured signing key keeps your domains stable")
 			default:
 				if identity, err = garlic.NewIdentity(); err != nil {
 					panic(err)
@@ -354,10 +374,32 @@ func main() {
 			if gcfg.CoverTrafficInterval, err = time.ParseDuration(cfg.Garlic.CoverTrafficInterval); err != nil {
 				panic(fmt.Sprintf("invalid Garlic.CoverTrafficInterval %q: %v", cfg.Garlic.CoverTrafficInterval, err))
 			}
-			n.garlic = garlic.New(n.core, identity, gcfg, garlic.NewStaticRendezvous())
+			n.garlic = garlic.New(n.core, identity, gcfg, nil)
 			logger.Printf("Your Garlic public key is %s", hex.EncodeToString(identity.PublicKey))
+			logger.Printf("Your Garlic default domain is %s", garlic.ComputeGID(identity.SigningPublicKey, nil).Domain())
 			if n.admin != nil {
 				n.garlic.SetupAdminHandlers(n.admin)
+			}
+			if cfg.Garlic.Proxy.Enabled {
+				n.garlicProxy, err = garlicproxy.Start(n.garlic, cfg.Garlic.Proxy.Listen)
+				if err != nil {
+					panic(err)
+				}
+				logger.Printf("Garlic browser proxy: http://%s (PAC: http://%s/proxy.pac)", n.garlicProxy.Addr(), n.garlicProxy.Addr())
+			}
+			for _, service := range cfg.Garlic.Services {
+				host, err := n.garlic.StartService(garlic.ServiceConfig{ServiceID: service.ServiceID, LocalAddr: service.LocalAddr, TLSLocalAddr: service.TLSLocalAddr})
+				if err != nil {
+					panic(err)
+				}
+				logger.Printf("Garlic website starting: http://%s/", host.Domain())
+				go func() {
+					select {
+					case <-host.Ready():
+						logger.Printf("Garlic website published: http://%s/", host.Domain())
+					case <-ctx.Done():
+					}
+				}()
 			}
 		}
 	}
@@ -429,6 +471,9 @@ func main() {
 	// Shut down the node.
 	if n.dashboard != nil {
 		_ = n.dashboard.Stop()
+	}
+	if n.garlicProxy != nil {
+		_ = n.garlicProxy.Close()
 	}
 	if n.garlic != nil {
 		n.garlic.Close()

@@ -44,6 +44,10 @@ const CapabilityGarlicV3 = "garlic-v3"
 // §8 for why the compatibility argument requires gating every position.
 const CapabilityAutoCircuit = "garlic-v2-auto"
 
+// CapabilitySites gates every hop of bidirectional site circuits and the
+// distributed descriptor protocol. Legacy circuits keep their wire format.
+const CapabilitySites = "garlic-sites-v1"
+
 const (
 	maxCapabilityVersions   = 16
 	maxCapabilityVersionLen = 32

@@ -1,6 +1,14 @@
 # Garlic Hidden Services — Design
 
-Status: **approved design, not yet implemented.**
+Status: **historical design; transport superseded by the site implementation.**
+
+Naming update: the first naming stage is now implemented as
+`<hash>.domains.yggg`; see [Garlic hash domains](../../garlic-domains.md).
+This replaces the `<base32-gid>.garlic.ygg` spelling throughout this
+historical design. The implemented transport instead uses two duplex
+Garlic circuits joined at a relay, with end-to-end QUIC/TLS and a
+distributed XOR directory. See [Garlic websites](../../garlic-sites.md)
+for the current architecture; the static inbound tunnels below were not built.
 
 This adds I2P-eepsite-style hidden services to the Garlic Routing
 Overlay: content reachable at `<base32-gid>.garlic.ygg`, one physical

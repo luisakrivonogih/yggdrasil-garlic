@@ -63,24 +63,37 @@ type NodeConfig struct {
 // Overlay (see docs/garlic-architecture.md). The zero value (Enabled:
 // false) means vanilla Yggdrasil behavior.
 type GarlicConfig struct {
-	Enabled              bool                `comment:"Enables the experimental Garlic Routing Overlay. Default is false."`
-	PrivateKey           KeyBytes            `json:",omitempty" comment:"This node's long-term Garlic identity private key. Independent of\nyour main Yggdrasil PrivateKey above - compromise of one does not\nimplicate the other. If left unset while Enabled is true, a fresh\nkey is generated at startup and your Garlic identity will not be\nstable across restarts."`
-	SigningPrivateKey    KeyBytes            `json:",omitempty" comment:"This node's Garlic service-descriptor signing key (Ed25519 seed,\n32 bytes). Independent of both PrivateKey above and your main\nYggdrasil key. Used only when publishing a Garlic service - see\ndocs/garlic-protocol.md section 6. If left unset while Enabled is\ntrue, a fresh key is generated at startup."`
-	PathLength           int                 `comment:"Number of hops for circuits this node originates."`
-	CircuitLifetime      string              `comment:"Maximum lifetime of a circuit before it must be rebuilt (Go duration\nformat, e.g. \"10m\")."`
-	MaxCircuits          int                 `comment:"Maximum number of circuits this node will originate at once."`
-	MaxCircuitsPerPeer   int                 `comment:"Maximum number of originated circuits through any single first-hop\npeer at once."`
-	MaxRelayCircuits     int                 `comment:"Maximum number of other nodes' circuits this node will relay at once."`
-	Padding              GarlicPaddingConfig `comment:"Per-hop packet size randomization: the originator and every relay\nindependently pick a new random wire size within [MinSize, MaxSize]\nfor each packet, so a hop-to-hop link's packet sizes don't match\nthose on the next link - see docs/garlic-threat-model.md's\ndiscussion of traffic correlation."`
-	Jitter               GarlicJitterConfig  `comment:"Random delay before actually transmitting a circuit packet (origin\nsend or relay forward), independently re-rolled per packet - the\ntiming half of the same traffic-correlation defense as Padding."`
-	MaxDiscoveredPeers   int                 `comment:"Maximum number of other Garlic nodes this node will remember, learned\neither directly (a successful capability query) or via gossip from\nanother already-verified Garlic peer. Never exposed to, or\ndiscoverable by, a non-Garlic node."`
-	MinHopCount          int                 `comment:"Minimum mesh hop distance for a candidate to be selected as a circuit\nhop by SelectPath - a node too close is more likely to be run by the\nsame operator or network as this one. Does not affect hops supplied\ndirectly to CreateCircuit."`
-	BootstrapPeers       []string            `comment:"Hex-encoded node keys of a few known Garlic-capable peers, queried at\nstartup so this node's candidate pool starts non-empty - analogous to\nthe top-level Peers setting, but for Garlic circuit-hop discovery\nrather than mesh transport. Empty by default."`
-	AutoPoolEnabled      bool                `comment:"Maintains a small background pool of automatically-built circuits\n(no manual hop keys needed) for sendGarlic/recvGarlic-style use and\nthe dashboard. Default is false; a node can still relay/terminate for\nother nodes' auto-pool circuits with this off."`
-	AutoPoolSize         int                 `comment:"Number of circuits the auto-pool maintains."`
-	AutoRotationInterval string              `comment:"How often one auto-pool circuit (the oldest) is retired and rebuilt\n(Go duration format, e.g. \"15m\"). Never the whole pool at once."`
-	CoverTrafficEnabled  bool                `comment:"Sends periodic dummy traffic over every auto-pool circuit, even when\nthere's nothing real to send - raises the cost of traffic-volume\ncorrelation. Real, ongoing bandwidth cost - see docs/garlic-threat-model.md.\nDefault is true, with a low-bandwidth default interval."`
-	CoverTrafficInterval string              `comment:"Average spacing between cover packets per auto-pool circuit (Go\nduration format), jittered +/-50% so it isn't perfectly periodic."`
+	Proxy                GarlicProxyConfig     `comment:"Local browser proxy for .domains.yggg sites. Uses Garlic circuits;\nnever performs public DNS resolution for these names."`
+	Services             []GarlicServiceConfig `comment:"Hidden websites hosted by this node. Empty means client/relay only.\nEach service forwards virtual port 80 to LocalAddr, and optionally\n443 to TLSLocalAddr, through an authenticated encrypted stream."`
+	Enabled              bool                  `comment:"Enables the experimental Garlic Routing Overlay. Default is false."`
+	PrivateKey           KeyBytes              `json:",omitempty" comment:"This node's long-term Garlic identity private key. Independent of\nyour main Yggdrasil PrivateKey above - compromise of one does not\nimplicate the other. If left unset while Enabled is true, a fresh\nkey is generated at startup and your Garlic identity will not be\nstable across restarts."`
+	SigningPrivateKey    KeyBytes              `json:",omitempty" comment:"This node's Garlic service-descriptor signing key (Ed25519 seed,\n32 bytes). Independent of both PrivateKey above and your main\nYggdrasil key. Used only when publishing a Garlic service - see\ndocs/garlic-protocol.md section 6. If left unset while Enabled is\ntrue, a fresh key is generated at startup."`
+	PathLength           int                   `comment:"Number of hops for circuits this node originates."`
+	CircuitLifetime      string                `comment:"Maximum lifetime of a circuit before it must be rebuilt (Go duration\nformat, e.g. \"10m\")."`
+	MaxCircuits          int                   `comment:"Maximum number of circuits this node will originate at once."`
+	MaxCircuitsPerPeer   int                   `comment:"Maximum number of originated circuits through any single first-hop\npeer at once."`
+	MaxRelayCircuits     int                   `comment:"Maximum number of other nodes' circuits this node will relay at once."`
+	Padding              GarlicPaddingConfig   `comment:"Per-hop packet size randomization: the originator and every relay\nindependently pick a new random wire size within [MinSize, MaxSize]\nfor each packet, so a hop-to-hop link's packet sizes don't match\nthose on the next link - see docs/garlic-threat-model.md's\ndiscussion of traffic correlation."`
+	Jitter               GarlicJitterConfig    `comment:"Random delay before actually transmitting a circuit packet (origin\nsend or relay forward), independently re-rolled per packet - the\ntiming half of the same traffic-correlation defense as Padding."`
+	MaxDiscoveredPeers   int                   `comment:"Maximum number of other Garlic nodes this node will remember, learned\neither directly (a successful capability query) or via gossip from\nanother already-verified Garlic peer. Never exposed to, or\ndiscoverable by, a non-Garlic node."`
+	MinHopCount          int                   `comment:"Minimum mesh hop distance for a candidate to be selected as a circuit\nhop by SelectPath - a node too close is more likely to be run by the\nsame operator or network as this one. Does not affect hops supplied\ndirectly to CreateCircuit."`
+	BootstrapPeers       []string              `comment:"Hex-encoded node keys of a few known Garlic-capable peers, queried at\nstartup so this node's candidate pool starts non-empty - analogous to\nthe top-level Peers setting, but for Garlic circuit-hop discovery\nrather than mesh transport. Empty by default."`
+	AutoPoolEnabled      bool                  `comment:"Maintains a small background pool of automatically-built circuits\n(no manual hop keys needed) for sendGarlic/recvGarlic-style use and\nthe dashboard. Default is false; a node can still relay/terminate for\nother nodes' auto-pool circuits with this off."`
+	AutoPoolSize         int                   `comment:"Number of circuits the auto-pool maintains."`
+	AutoRotationInterval string                `comment:"How often one auto-pool circuit (the oldest) is retired and rebuilt\n(Go duration format, e.g. \"15m\"). Never the whole pool at once."`
+	CoverTrafficEnabled  bool                  `comment:"Sends periodic dummy traffic over every auto-pool circuit, even when\nthere's nothing real to send - raises the cost of traffic-volume\ncorrelation. Real, ongoing bandwidth cost - see docs/garlic-threat-model.md.\nDefault is true, with a low-bandwidth default interval."`
+	CoverTrafficInterval string                `comment:"Average spacing between cover packets per auto-pool circuit (Go\nduration format), jittered +/-50% so it isn't perfectly periodic."`
+}
+
+type GarlicProxyConfig struct {
+	Enabled bool
+	Listen  string
+}
+
+type GarlicServiceConfig struct {
+	ServiceID    string `comment:"Optional hex service ID; empty selects the default hash domain."`
+	LocalAddr    string `comment:"Existing local HTTP server, e.g. 127.0.0.1:8080 (virtual port 80)."`
+	TLSLocalAddr string `json:",omitempty" comment:"Optional existing HTTPS server for virtual port 443. Browser certificate\nvalidation is independent of the Garlic transport's authenticated TLS."`
 }
 
 type GarlicPaddingConfig struct {
@@ -132,6 +145,8 @@ func GenerateConfig() *NodeConfig {
 	cfg.IfMTU = defaults.DefaultIfMTU
 	cfg.NodeInfoPrivacy = false
 	cfg.Garlic = GarlicConfig{
+		Proxy:              GarlicProxyConfig{Enabled: true, Listen: "127.0.0.1:4444"},
+		Services:           []GarlicServiceConfig{},
 		Enabled:            false,
 		PathLength:         3,
 		CircuitLifetime:    "10m",

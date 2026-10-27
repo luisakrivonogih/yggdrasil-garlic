@@ -25,6 +25,7 @@ package garlic
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/hex"
 	"errors"
@@ -234,13 +235,17 @@ type Garlic struct {
 	identity *Identity
 	cfg      Config
 
-	circuits   *CircuitManager
-	relayState *relayCircuitState
-	limiter    *RateLimiter
-	rendezvous Rendezvous
-	scheduler  *jitterScheduler
-	discovery  *discoveryRegistry
-	security   SecurityCounters
+	circuits    *CircuitManager
+	relayState  *relayCircuitState
+	limiter     *RateLimiter
+	siteLimiter *RateLimiter
+	rendezvous  Rendezvous
+	scheduler   *jitterScheduler
+	discovery   *discoveryRegistry
+	security    SecurityCounters
+	duplex      *duplexState
+	directory   *NetworkRendezvous
+	sites       *siteRouter
 
 	delivered     chan DeliveredMessage
 	autoDelivered chan AutoDeliveredMessage
@@ -248,6 +253,7 @@ type Garlic struct {
 	mu              sync.Mutex
 	capabilityCache map[string]*CapabilityMessage
 	pending         map[string]chan *CapabilityMessage
+	capFlights      map[string]*capabilityFlight
 	originEphemeral map[CircuitID][]byte
 	pools           map[PoolID]*circuitPool
 	autoPool        map[CircuitID]time.Time
@@ -268,6 +274,7 @@ func New(c *core.Core, identity *Identity, cfg Config, rendezvous Rendezvous) *G
 		circuits:        NewCircuitManager(CircuitManagerConfig{MaxCircuits: cfg.MaxCircuits, MaxCircuitsPerPeer: cfg.MaxCircuitsPerPeer}),
 		relayState:      newRelayCircuitState(cfg.MaxRelayCircuits),
 		limiter:         NewRateLimiter(cfg.RatePerSecond, cfg.RateBurst, cfg.MaxTrackedPeers),
+		siteLimiter:     NewRateLimiter(512, 1024, cfg.MaxTrackedPeers),
 		rendezvous:      rendezvous,
 		discovery:       newDiscoveryRegistry(cfg.MaxDiscoveredPeers, c.PublicKey()),
 		delivered:       make(chan DeliveredMessage, 256),
@@ -283,6 +290,12 @@ func New(c *core.Core, identity *Identity, cfg Config, rendezvous Rendezvous) *G
 		_, err := c.WriteGarlic(data, addr)
 		return err
 	}, cfg.JitterQueueSize, jitterWorkers)
+	g.duplex = newDuplexState(g)
+	g.directory = newNetworkRendezvous(g)
+	if g.rendezvous == nil {
+		g.rendezvous = g.directory
+	}
+	g.sites = newSiteRouter(g)
 	c.SetGarlicHandler(g.handleIncoming)
 	go g.cleanupLoop()
 	go g.bootstrap()
@@ -294,9 +307,10 @@ func New(c *core.Core, identity *Identity, cfg Config, rendezvous Rendezvous) *G
 // loop and the jitter scheduler. It does not close the underlying
 // core.Core.
 func (g *Garlic) Close() {
+	close(g.stop)
+	g.sites.close()
 	g.core.SetGarlicHandler(nil)
 	g.scheduler.Stop()
-	close(g.stop)
 }
 
 // sendCircuitData transmits a circuitData wire message to addr, applying
@@ -305,6 +319,10 @@ func (g *Garlic) Close() {
 // misconfiguration degrades to unjittered delivery rather than dropping
 // an otherwise-valid packet.
 func (g *Garlic) sendCircuitData(msg []byte, addr net.Addr) {
+	if peer, ok := addr.(iwt.Addr); ok && g.core != nil && bytes.Equal(peer, g.core.PublicKey()) {
+		g.handleIncoming(g.core.PublicKey(), msg)
+		return
+	}
 	var delay time.Duration
 	if g.cfg.JitterEnabled {
 		if d, err := randomJitter(g.cfg.MinJitter, g.cfg.MaxJitter); err == nil {
@@ -324,9 +342,11 @@ func (g *Garlic) cleanupLoop() {
 	for {
 		select {
 		case <-t.C:
+			g.duplex.prune()
 			g.circuits.ExpireStale()
 			g.relayState.expireStale(2 * g.cfg.CircuitLifetime)
 			g.limiter.Cleanup(time.Hour)
+			g.siteLimiter.Cleanup(time.Hour)
 		case <-gossip.C:
 			g.gossipTick()
 		case <-g.stop:
@@ -898,10 +918,14 @@ func (g *Garlic) Identity() *Identity {
 // must not block (see GarlicHandler's doc comment), so every branch here
 // either returns immediately or hands off a bounded amount of work.
 func (g *Garlic) handleIncoming(from ed25519.PublicKey, data []byte) {
-	if !g.limiter.Allow(from) {
+	if len(data) == 0 {
 		return
 	}
-	if len(data) == 0 {
+	limiter := g.limiter
+	if data[0] == msgTypeDuplexData || data[0] == msgTypeCircuitReply {
+		limiter = g.siteLimiter
+	}
+	if !limiter.Allow(from) {
 		return
 	}
 	switch data[0] {
@@ -941,6 +965,10 @@ func (g *Garlic) handleIncoming(from ed25519.PublicKey, data []byte) {
 		_ = g.GossipAnnounce(from)
 	case msgTypeCircuitDataV3:
 		g.dispatchAction(g.processCircuitData(data[1:], msgTypeCircuitDataV3), from)
+	case msgTypeDuplexData:
+		g.dispatchAction(g.processCircuitData(data[1:], msgTypeDuplexData), from)
+	case msgTypeCircuitReply:
+		g.duplex.receive(from, data[1:])
 	}
 }
 
@@ -950,6 +978,15 @@ func (g *Garlic) handleIncoming(from ed25519.PublicKey, data []byte) {
 // circuit's previous hop when forwarding, never used or stored for any
 // other action kind.
 func (g *Garlic) dispatchAction(action circuitAction, from ed25519.PublicKey) {
+	if len(action.replyKey) != 0 {
+		if !g.duplex.record(action, from) {
+			return
+		}
+		if action.kind == actionDeliver {
+			g.sites.enqueue(action.circuitID, action.payload, false)
+			return
+		}
+	}
 	switch action.kind {
 	case actionDeliver:
 		if action.tagged {
@@ -1054,6 +1091,16 @@ func (g *Garlic) handleCapabilityResponse(from ed25519.PublicKey, body []byte) {
 // peer should be treated as legacy: it must never be selected as a
 // circuit hop or rendezvous point.
 func (g *Garlic) QueryCapability(peer ed25519.PublicKey) (*CapabilityMessage, error) {
+	return g.queryCapabilityContext(context.Background(), peer)
+}
+
+func (g *Garlic) queryCapabilityContext(ctx context.Context, peer ed25519.PublicKey) (*CapabilityMessage, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if g.core != nil && bytes.Equal(peer, g.core.PublicKey()) {
+		return UnmarshalCapabilityMessage(g.processCapabilityRequest())
+	}
 	key := hex.EncodeToString(peer)
 	g.mu.Lock()
 	if cached, ok := g.capabilityCache[key]; ok {
@@ -1061,7 +1108,7 @@ func (g *Garlic) QueryCapability(peer ed25519.PublicKey) (*CapabilityMessage, er
 		return cached, nil
 	}
 	g.mu.Unlock()
-	return g.requestCapability(peer)
+	return g.requestCapabilityContext(ctx, peer)
 }
 
 // PingCapability behaves like QueryCapability but always sends a fresh
@@ -1079,15 +1126,46 @@ func (g *Garlic) PingCapability(peer ed25519.PublicKey) (*CapabilityMessage, tim
 	return msg, time.Since(start), nil
 }
 
+type capabilityFlight struct {
+	done    chan struct{}
+	message *CapabilityMessage
+	err     error
+}
+
 func (g *Garlic) requestCapability(peer ed25519.PublicKey) (*CapabilityMessage, error) {
+	return g.requestCapabilityContext(context.Background(), peer)
+}
+
+func (g *Garlic) requestCapabilityContext(ctx context.Context, peer ed25519.PublicKey) (message *CapabilityMessage, resultErr error) {
 	key := hex.EncodeToString(peer)
 	ch := make(chan *CapabilityMessage, 1)
 	g.mu.Lock()
+	if g.capFlights == nil {
+		g.capFlights = make(map[string]*capabilityFlight)
+	}
+	if flight := g.capFlights[key]; flight != nil {
+		g.mu.Unlock()
+		select {
+		case <-flight.done:
+			return flight.message, flight.err
+		case <-g.stop:
+			return nil, net.ErrClosed
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	flight := &capabilityFlight{done: make(chan struct{})}
+	g.capFlights[key] = flight
 	g.pending[key] = ch
 	g.mu.Unlock()
 	defer func() {
 		g.mu.Lock()
-		delete(g.pending, key)
+		if g.pending[key] == ch {
+			delete(g.pending, key)
+		}
+		flight.message, flight.err = message, resultErr
+		delete(g.capFlights, key)
+		close(flight.done)
 		g.mu.Unlock()
 	}()
 
@@ -1099,6 +1177,10 @@ func (g *Garlic) requestCapability(peer ed25519.PublicKey) (*CapabilityMessage, 
 		return msg, nil
 	case <-time.After(g.cfg.CapabilityTimeout):
 		return nil, ErrCapabilityTimeout
+	case <-g.stop:
+		return nil, net.ErrClosed
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 }
 
@@ -1173,6 +1255,7 @@ func (g *Garlic) CreateCircuit(path []CapabilityMessage, nodeKeys [][]byte) (Cir
 			NextEphemeralPub: nextEphemeral,
 			LocalCircuitID:   localID,
 		}
+		hops[i].ReplyKey, _ = deriveReplyKey(secret)
 	}
 
 	c, err := g.circuits.Add(hops, g.cfg.CircuitLifetime, g.cfg.MaxPacketsPerCircuit, g.cfg.MaxBytesPerCircuit)
@@ -1188,6 +1271,9 @@ func (g *Garlic) CreateCircuit(path []CapabilityMessage, nodeKeys [][]byte) (Cir
 
 // CloseCircuit closes and stops tracking id.
 func (g *Garlic) CloseCircuit(id CircuitID) {
+	if g.duplex != nil {
+		g.duplex.forget(id)
+	}
 	g.circuits.Close(id)
 	g.mu.Lock()
 	delete(g.originEphemeral, id)

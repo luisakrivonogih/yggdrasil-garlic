@@ -43,6 +43,7 @@ var (
 type Hop struct {
 	NodeKey          []byte    // this hop's Yggdrasil public key (routing address)
 	Key              []byte    // per-hop symmetric key, already derived (e.g. via ECDH + deriveLayerKey)
+	ReplyKey         []byte    // independent reverse-direction key; only used by duplex circuits
 	Counter          uint64    // nonce/replay counter for this hop's layer
 	NextEphemeralPub []byte    // ephemeral X25519 pubkey for the hop that follows this one; nil for the final hop
 	LocalCircuitID   CircuitID // this hop's own leg identifier for the hop-local envelope format (EnvelopeVersion2) - the CircuitID this hop is told to expect on its incoming leg. Unused by the legacy (EnvelopeVersion1) format.
