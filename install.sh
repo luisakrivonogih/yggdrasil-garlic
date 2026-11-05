@@ -97,7 +97,10 @@ log "Detected $PKGKIND packaging, arch $PKGARCH"
 case "$PKGKIND" in
   deb)
     log "Installing build prerequisites (git, binutils, curl)"
-    apt-get update -y
+    # A broken third-party repository (e.g. an outdated apt.postgresql.org
+    # entry) makes apt-get update fail; the packages below come from the
+    # distribution, so carry on and let apt-get install report real problems.
+    apt-get update -y || log "apt-get update reported errors (a broken third-party repository?) - continuing"
     apt-get install -y git binutils gzip ca-certificates curl
     ;;
   rpm)
