@@ -2,6 +2,7 @@
 # Сборка и установка Yggdrasil + Garlic для macOS и Linux.
 #
 #   sh scripts/setup.sh build            собрать в ./bin
+# (из git-клона скрипт сам делает git pull --ff-only; NO_UPDATE=1 отключает)
 #   sh scripts/setup.sh install          собрать, установить, создать конфиг, запустить сервис (нужен sudo)
 #   sh scripts/setup.sh uninstall        остановить сервис и удалить бинарники (конфиг остаётся)
 #
@@ -22,8 +23,29 @@ need_go() {
   command -v go >/dev/null 2>&1 || { echo "Не найден Go (нужен >= 1.26): https://go.dev/dl/" >&2; exit 1; }
 }
 
+# Подтягивает свежий код, если запущено из git-клона и он отстаёт от origin.
+update_source() {
+  [ "${NO_UPDATE:-0}" = 1 ] && return 0
+  [ -d .git ] || return 0
+  command -v git >/dev/null 2>&1 || return 0
+  # от sudo git ругается на владельца каталога
+  # под sudo обновляем от имени владельца, чтобы не оставить в .git файлы root
+  if [ "$(id -u)" = 0 ] && [ -n "$SUDO_USER" ]; then GIT="sudo -u $SUDO_USER git"; else GIT="git"; fi
+  BR=$($GIT rev-parse --abbrev-ref HEAD 2>/dev/null) || return 0
+  $GIT fetch -q origin "$BR" 2>/dev/null || { echo "==> не удалось связаться с origin, собираю локальную версию"; return 0; }
+  if [ "$($GIT rev-parse HEAD)" = "$($GIT rev-parse FETCH_HEAD)" ]; then
+    echo "==> код актуален ($($GIT rev-parse --short HEAD))"
+  elif $GIT merge-base --is-ancestor HEAD FETCH_HEAD; then
+    echo "==> обновляю $BR: $($GIT rev-parse --short HEAD) -> $($GIT rev-parse --short FETCH_HEAD)"
+    $GIT merge -q --ff-only FETCH_HEAD || echo "==> не удалось обновить (локальные изменения?), собираю как есть"
+  else
+    echo "==> локальная ветка опережает или разошлась с origin, не трогаю"
+  fi
+}
+
 build() {
   need_go
+  update_source
   PKGSRC=github.com/yggdrasil-network/yggdrasil-go/src/version
   NAME=$(sh contrib/semver/name.sh 2>/dev/null || echo yggdrasil)
   VER=$(sh contrib/semver/version.sh --bare 2>/dev/null || echo dev)
@@ -63,7 +85,7 @@ configure() {
 install_all() {
   [ "$(id -u)" = 0 ] || { echo "Запусти с sudo: sudo -E sh scripts/setup.sh install" >&2; exit 1; }
   # go при sudo может быть не в PATH
-  [ -x bin/yggdrasil ] || build
+  build
   install -d "$PREFIX/bin"
   install -m 755 bin/yggdrasil bin/yggdrasilctl "$PREFIX/bin/"
   configure

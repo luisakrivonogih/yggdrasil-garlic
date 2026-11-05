@@ -113,6 +113,11 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P) || SCRIPT
 if [ -n "$SCRIPT_DIR" ] && grep -q '^module github.com/yggdrasil-network/yggdrasil-go$' "$SCRIPT_DIR/go.mod" 2>/dev/null; then
   SRC_DIR="$SCRIPT_DIR"
   log "Running from an existing checkout at $SRC_DIR"
+  if [ "${NO_UPDATE:-0}" != 1 ] && [ -d "$SRC_DIR/.git" ]; then
+    log "Checking for newer commits (NO_UPDATE=1 to skip)"
+    if [ -n "$SUDO_USER" ]; then _G="sudo -u $SUDO_USER git"; else _G=git; fi
+    $_G -C "$SRC_DIR" pull --ff-only -q || log "git pull failed (local changes?), building the current checkout"
+  fi
 else
   SRC_DIR="$WORKDIR/src"
   log "Cloning $REPO_URL ($REPO_BRANCH branch) into $SRC_DIR"

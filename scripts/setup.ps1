@@ -17,6 +17,11 @@ $Root = (Get-Location).Path
 $ConfPath = "$env:ProgramData\Yggdrasil\yggdrasil.conf"
 
 function Build {
+  if ((Test-Path .git) -and (Get-Command git -ErrorAction SilentlyContinue)) {
+    Write-Host '==> git pull --ff-only'
+    git pull --ff-only
+    if ($LASTEXITCODE -ne 0) { Write-Host 'не удалось обновить, собираю текущую версию' }
+  }
   if (-not (Get-Command go -ErrorAction SilentlyContinue)) { throw 'Не найден Go (нужен >= 1.26): https://go.dev/dl/' }
   New-Item -ItemType Directory -Force bin | Out-Null
   $pkg = 'github.com/yggdrasil-network/yggdrasil-go/src/version'
@@ -51,7 +56,7 @@ function Install {
   if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole('Administrator')) {
     throw 'Нужен запуск от администратора'
   }
-  if (-not (Test-Path bin\yggdrasil.exe)) { Build }
+  Build
   New-Item -ItemType Directory -Force $InstallDir | Out-Null
   Copy-Item bin\*.exe $InstallDir -Force
   Configure
