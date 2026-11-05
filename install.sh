@@ -2,6 +2,10 @@
 
 # Convenience installer for the Garlic Routing Overlay branch of Yggdrasil.
 #
+# macOS: builds from source with Go and installs a launchd service (delegates
+# to scripts/setup.sh; honours PEERS and SITE_ADDR). Needs `brew install go`.
+# Windows: use scripts\\setup.ps1.
+#
 # Builds an actual .deb or .rpm from source (autodetecting your package
 # manager and CPU architecture), installs it, enables the Garlic Routing
 # Overlay in the generated config, restarts the service, and prints a
@@ -46,6 +50,25 @@ GARLIC_BOOTSTRAP_PEERS=${GARLIC_BOOTSTRAP_PEERS:-}
 
 log() { echo "==> $*"; }
 die() { echo "error: $*" >&2; exit 1; }
+
+# ---- 0. macOS: delegate to scripts/setup.sh (launchd, no deb/rpm) ----
+if [ "$(uname -s)" = "Darwin" ]; then
+  [ "$(id -u)" = "0" ] || die "this needs root - run: curl -fsSL <url> | sudo -E sh   (or sudo -E sh install.sh)"
+  command -v go >/dev/null 2>&1 || die "Go is required on macOS to build: brew install go (https://go.dev/dl/)"
+  command -v git >/dev/null 2>&1 || die "git is required (xcode-select --install)"
+  SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P) || SCRIPT_DIR=""
+  if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/scripts/setup.sh" ]; then
+    MAC_SRC="$SCRIPT_DIR"
+    log "macOS: using existing checkout at $MAC_SRC"
+  else
+    MAC_SRC=$(mktemp -d /tmp/yggdrasil-garlic.XXXXXX)
+    log "macOS: cloning $REPO_URL ($REPO_BRANCH) into $MAC_SRC"
+    git clone --depth 1 --branch "$REPO_BRANCH" "$REPO_URL" "$MAC_SRC"
+  fi
+  cd "$MAC_SRC"
+  # PEERS / SITE_ADDR / PREFIX / CONF are passed through the environment.
+  exec sh scripts/setup.sh install
+fi
 
 [ "$(id -u)" = "0" ] || die "this needs to run as root (e.g. sudo sh install.sh) - it installs a system package and a systemd service"
 
