@@ -124,21 +124,9 @@ func TestSupportsGarlicV3(t *testing.T) {
 	}
 }
 
-func TestProcessCapabilityRequestAdvertisesGarlicV3(t *testing.T) {
-	id, err := NewIdentity()
-	if err != nil {
-		t.Fatalf("NewIdentity returned error: %v", err)
-	}
-	g := &Garlic{identity: id}
-	payload := g.processCapabilityRequest()
-	msg, err := UnmarshalCapabilityMessage(payload)
-	if err != nil {
-		t.Fatalf("UnmarshalCapabilityMessage returned error: %v", err)
-	}
-	if !msg.SupportsGarlicV3() {
-		t.Fatalf("advertised versions = %v, want garlic-v3 present", msg.Versions)
-	}
-	if !msg.SupportsGarlicV2() {
-		t.Fatalf("advertised versions = %v, want garlic-v2 still present for backward compat", msg.Versions)
+func TestRelaysAdvertiseGarlicV3(t *testing.T) {
+	msg := &CapabilityMessage{Versions: supportedVersions()}
+	if !msg.SupportsGarlicV3() || !msg.SupportsGarlicV2() {
+		t.Fatalf("advertised versions = %v, want garlic-v2 and garlic-v3", msg.Versions)
 	}
 }

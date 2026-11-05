@@ -133,6 +133,7 @@ func BenchmarkProcessCircuitDataTerminalHop(b *testing.B) {
 	}
 	g := &Garlic{
 		identity: id,
+		onion:    testOnion(id),
 		cfg:      DefaultConfig(),
 	}
 	payload := make([]byte, 1200)

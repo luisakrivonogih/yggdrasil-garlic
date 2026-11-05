@@ -347,10 +347,10 @@ func TestIntegrationHubLearnsAboutRequesterWithoutQueryingItself(t *testing.T) {
 
 // TestIntegrationStarTopologyConverges reproduces the exact real-world
 // scenario this fix targets: every "leaf" node points its
-// Config.BootstrapPeers at one central "hub" (the common, natural
+// Config.TrustedPeers at one central "hub" (the common, natural
 // topology when several independently-installed servers are each told
 // "bootstrap against this one already-running node"), and the hub itself
-// has no BootstrapPeers of its own. Before this fix, the hub could never
+// has no TrustedPeers of its own. Before this fix, the hub could never
 // learn about any leaf (each leaf only ever queried it, never the other
 // way around), so it had nothing to gossip and the leaves could never
 // discover each other - the star could never converge into a shared
@@ -394,7 +394,7 @@ func TestIntegrationStarTopologyConverges(t *testing.T) {
 	defer gLeafC.Close()
 
 	// Both leaves bootstrap against the hub - exactly matching
-	// Config.BootstrapPeers pointed at one already-running node. The hub
+	// Config.TrustedPeers pointed at one already-running node. The hub
 	// itself never initiates anything.
 	waitForCapability(t, gLeafA, nodeHub.PublicKey(), 60*time.Second)
 	waitForCapability(t, gLeafC, nodeHub.PublicKey(), 60*time.Second)
@@ -841,7 +841,7 @@ func TestIntegrationSendGarlicAutoThenRecvGarlicAutoRoundTrips(t *testing.T) {
 	}
 }
 
-func TestIntegrationBootstrapPeersRecordedAsSelfVerified(t *testing.T) {
+func TestIntegrationTrustedPeersRecordedAsSelfVerified(t *testing.T) {
 	nodeA := newLinkedTestNode(t)
 	nodeB := newLinkedTestNode(t)
 	all := []*core.Core{nodeA, nodeB}
@@ -869,7 +869,7 @@ func TestIntegrationBootstrapPeersRecordedAsSelfVerified(t *testing.T) {
 
 	cfgA := garlic.DefaultConfig()
 	cfgA.CapabilityTimeout = 2 * time.Second
-	cfgA.BootstrapPeers = []string{hex.EncodeToString(nodeB.PublicKey())}
+	cfgA.TrustedPeers = []string{hex.EncodeToString(nodeB.PublicKey())}
 	gA := garlic.New(nodeA, idA, cfgA, garlic.NewStaticRendezvous())
 	defer gA.Close()
 
@@ -885,13 +885,13 @@ func TestIntegrationBootstrapPeersRecordedAsSelfVerified(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("A never recorded its configured BootstrapPeers entry as self-verified; known peers: %+v", gA.KnownPeers())
+			t.Fatalf("A never recorded its configured TrustedPeers entry as self-verified; known peers: %+v", gA.KnownPeers())
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 }
 
-func TestIntegrationAutoCreateCircuitUsesSelfVerifiedGuard(t *testing.T) {
+func TestIntegrationAutoCreateCircuitUsesTrustedGuard(t *testing.T) {
 	nodeA := newLinkedTestNode(t)
 	nodeB := newLinkedTestNode(t)
 	all := []*core.Core{nodeA, nodeB}
@@ -914,7 +914,9 @@ func TestIntegrationAutoCreateCircuitUsesSelfVerifiedGuard(t *testing.T) {
 	cfg.CapabilityTimeout = 2 * time.Second
 	cfg.MinHopCount = 0 // this tiny topology has no room for a real distance filter
 
-	gA := garlic.New(nodeA, idA, cfg, garlic.NewStaticRendezvous())
+	cfgA := cfg
+	cfgA.TrustedPeers = []string{hex.EncodeToString(nodeB.PublicKey())}
+	gA := garlic.New(nodeA, idA, cfgA, garlic.NewStaticRendezvous())
 	defer gA.Close()
 	gB := garlic.New(nodeB, idB, cfg, garlic.NewStaticRendezvous())
 	defer gB.Close()
@@ -937,11 +939,11 @@ func TestIntegrationAutoCreateCircuitUsesSelfVerifiedGuard(t *testing.T) {
 	}
 	hops := found.HopKeys()
 	if len(hops) != 1 || !bytes.Equal(hops[0], nodeB.PublicKey()) {
-		t.Fatalf("hops = %x, want [%x] (B, the only self-verified candidate)", hops, nodeB.PublicKey())
+		t.Fatalf("hops = %x, want [%x] (B, the trusted guard)", hops, nodeB.PublicKey())
 	}
 }
 
-func TestIntegrationAutoCreateCircuitFailsWithoutSelfVerifiedCandidate(t *testing.T) {
+func TestIntegrationAutoCreateCircuitFailsWithoutTrustedPeer(t *testing.T) {
 	nodeA := newLinkedTestNode(t) // deliberately unpeered - candidatePool() will be empty
 	defer nodeA.Stop()
 
@@ -952,8 +954,8 @@ func TestIntegrationAutoCreateCircuitFailsWithoutSelfVerifiedCandidate(t *testin
 	gA := garlic.New(nodeA, idA, garlic.DefaultConfig(), garlic.NewStaticRendezvous())
 	defer gA.Close()
 
-	if _, err := gA.AutoCreateCircuit(1); !errors.Is(err, garlic.ErrNoSelfVerifiedCandidates) {
-		t.Fatalf("err = %v, want ErrNoSelfVerifiedCandidates", err)
+	if _, err := gA.AutoCreateCircuit(1); !errors.Is(err, garlic.ErrNoTrustedPeers) {
+		t.Fatalf("err = %v, want ErrNoTrustedPeers", err)
 	}
 }
 
@@ -985,7 +987,7 @@ func TestIntegrationAutoPoolFillsToTargetSize(t *testing.T) {
 	cfgA.CapabilityTimeout = 2 * time.Second
 	cfgA.MinHopCount = 0
 	cfgA.PathLength = 1
-	cfgA.BootstrapPeers = []string{hex.EncodeToString(nodeB.PublicKey())}
+	cfgA.TrustedPeers = []string{hex.EncodeToString(nodeB.PublicKey())}
 	cfgA.AutoPoolEnabled = true
 	cfgA.AutoPoolSize = 1
 	cfgA.CoverTrafficEnabled = false // isolate fill/rotate behavior from cover-traffic noise
@@ -1062,7 +1064,7 @@ func TestIntegrationAutoPoolFillStaggersCircuitCreation(t *testing.T) {
 	cfgA.CapabilityTimeout = 2 * time.Second
 	cfgA.MinHopCount = 0
 	cfgA.PathLength = 1
-	cfgA.BootstrapPeers = []string{hex.EncodeToString(nodeB.PublicKey())}
+	cfgA.TrustedPeers = []string{hex.EncodeToString(nodeB.PublicKey())}
 	cfgA.AutoPoolEnabled = true
 	cfgA.AutoPoolSize = poolSize
 	cfgA.AutoRotationInterval = 5 * time.Minute // rotation must never churn CreatedAt during this test
@@ -1126,7 +1128,7 @@ func TestIntegrationAutoPoolRotatesOneCircuitAtATime(t *testing.T) {
 	cfgA.CapabilityTimeout = 2 * time.Second
 	cfgA.MinHopCount = 0
 	cfgA.PathLength = 1
-	cfgA.BootstrapPeers = []string{hex.EncodeToString(nodeB.PublicKey())}
+	cfgA.TrustedPeers = []string{hex.EncodeToString(nodeB.PublicKey())}
 	cfgA.AutoPoolEnabled = true
 	cfgA.AutoPoolSize = 2 // two circuits, both through the only candidate B, so rotation has something to distinguish
 	cfgA.AutoRotationInterval = 1100 * time.Millisecond
@@ -1221,7 +1223,7 @@ func TestIntegrationAutoPoolPrunesExpiredCircuits(t *testing.T) {
 	cfgA.CapabilityTimeout = 2 * time.Second
 	cfgA.MinHopCount = 0
 	cfgA.PathLength = 1
-	cfgA.BootstrapPeers = []string{hex.EncodeToString(nodeB.PublicKey())}
+	cfgA.TrustedPeers = []string{hex.EncodeToString(nodeB.PublicKey())}
 	cfgA.AutoPoolEnabled = true
 	cfgA.AutoPoolSize = poolSize
 	cfgA.CircuitLifetime = 2 * time.Second
@@ -1314,7 +1316,7 @@ func TestIntegrationCoverTrafficNeverReachesRecvGarlicAuto(t *testing.T) {
 	cfgA.CapabilityTimeout = 2 * time.Second
 	cfgA.MinHopCount = 0
 	cfgA.PathLength = 1
-	cfgA.BootstrapPeers = []string{hex.EncodeToString(nodeB.PublicKey())}
+	cfgA.TrustedPeers = []string{hex.EncodeToString(nodeB.PublicKey())}
 	cfgA.AutoPoolEnabled = true
 	cfgA.AutoPoolSize = 1
 	cfgA.CoverTrafficEnabled = true
@@ -1402,7 +1404,7 @@ func TestIntegrationCoverTrafficActuallyFiresFromAutoPoolLoop(t *testing.T) {
 	cfgA.CapabilityTimeout = 2 * time.Second
 	cfgA.MinHopCount = 0
 	cfgA.PathLength = 1
-	cfgA.BootstrapPeers = []string{hex.EncodeToString(nodeB.PublicKey())}
+	cfgA.TrustedPeers = []string{hex.EncodeToString(nodeB.PublicKey())}
 	cfgA.AutoPoolEnabled = true
 	cfgA.AutoPoolSize = 1
 	cfgA.AutoRotationInterval = 5 * time.Minute // no rotation during the test: a closed circuit takes its counters with it

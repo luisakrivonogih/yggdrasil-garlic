@@ -3,6 +3,7 @@ package garlic_test
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,20 @@ import (
 	"github.com/yggdrasil-network/yggdrasil-go/src/garlic"
 	"github.com/yggdrasil-network/yggdrasil-go/src/garlicproxy"
 )
+
+// waitForKnownRelays pulls gossip from a trusted relay until g knows at
+// least n relays.
+func waitForKnownRelays(t *testing.T, g *garlic.Garlic, n int, from []byte) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for len(g.KnownPeers()) < n {
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d relays known after gossip, want %d", len(g.KnownPeers()), n)
+		}
+		_ = g.RequestGossip(from)
+		time.Sleep(200 * time.Millisecond)
+	}
+}
 
 func TestSiteBrowserAcrossDistributedMesh(t *testing.T) {
 	if testing.Short() {
@@ -29,22 +44,43 @@ func TestSiteBrowserAcrossDistributedMesh(t *testing.T) {
 	cfg.AutoPoolEnabled = false
 	cfg.CircuitLifetime = 12 * time.Second
 	cfg.CapabilityTimeout = 2 * time.Second
-	newNode := func() (*core.Core, *garlic.Garlic) {
+	// Nodes 1-3 are public relays. Node 0 hosts the site in hidden mode and
+	// trusts relay 1 as its guard; it is never contacted by anyone else.
+	newNode := func(hidden bool, trusted ...[]byte) (*core.Core, *garlic.Garlic) {
 		n := newLinkedTestNode(t)
 		id, err := garlic.NewIdentity()
 		if err != nil {
 			t.Fatal(err)
 		}
-		g := garlic.New(n, id, cfg, nil)
+		c := cfg
+		c.Hidden = hidden
+		for _, k := range trusted {
+			c.TrustedPeers = append(c.TrustedPeers, hex.EncodeToString(k))
+		}
+		g := garlic.New(n, id, c, nil)
 		nodes = append(nodes, n)
 		overlays = append(overlays, g)
 		return n, g
 	}
-	for range 4 {
-		newNode()
+	cores := make([]*core.Core, 4)
+	for i := range cores {
+		cores[i] = newLinkedTestNode(t)
 	}
-	connectChain(t, nodes)
-	pumpAll(nodes)
+	connectChain(t, cores)
+	pumpAll(cores)
+	for i, n := range cores {
+		id, err := garlic.NewIdentity()
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := cfg
+		if i == 0 {
+			c.Hidden = true
+			c.TrustedPeers = []string{hex.EncodeToString(cores[1].PublicKey())}
+		}
+		nodes = append(nodes, n)
+		overlays = append(overlays, garlic.New(n, id, c, nil))
+	}
 	t.Cleanup(func() {
 		for _, g := range overlays {
 			g.Close()
@@ -53,12 +89,18 @@ func TestSiteBrowserAcrossDistributedMesh(t *testing.T) {
 			n.Stop()
 		}
 	})
-	for i, g := range overlays {
-		for j, n := range nodes {
+	for i := 1; i < 4; i++ {
+		for j := 1; j < 4; j++ {
 			if i != j {
-				t.Logf("resolving capabilities %d -> %d", i, j)
-				waitForCapability(t, g, n.PublicKey(), 60*time.Second)
+				waitForCapability(t, overlays[i], nodes[j].PublicKey(), 60*time.Second)
 			}
+		}
+	}
+	waitForCapability(t, overlays[0], nodes[1].PublicKey(), 60*time.Second)
+	waitForKnownRelays(t, overlays[0], 3, nodes[1].PublicKey())
+	for i := 1; i < 4; i++ {
+		if _, err := overlays[i].QueryCapability(nodes[0].PublicKey()); err == nil {
+			t.Fatal("the hidden site host answered a capability query")
 		}
 	}
 	payload := bytes.Repeat([]byte("garlic website data\n"), 110000)
@@ -92,19 +134,14 @@ func TestSiteBrowserAcrossDistributedMesh(t *testing.T) {
 	case <-time.After(40 * time.Second):
 		t.Fatalf("publication not ready: %v", service.LastError())
 	}
-	// This node joins only after publication. Its directory starts empty,
-	// and it receives only one bootstrap peer, never the service descriptor.
-	fresh, client := newNode()
+	// This hidden client joins only after publication. Its directory starts
+	// empty, and it knows only one trusted relay, never the service
+	// descriptor.
+	fresh, client := newNode(true, nodes[1].PublicKey())
 	connectChain(t, []*core.Core{nodes[1], fresh})
 	pumpAll([]*core.Core{fresh})
 	waitForCapability(t, client, nodes[1].PublicKey(), 30*time.Second)
-	if err := client.RequestGossip(nodes[1].PublicKey()); err != nil {
-		t.Fatal(err)
-	}
-	deadline := time.Now().Add(10 * time.Second)
-	for len(client.KnownPeers()) < 3 && time.Now().Before(deadline) {
-		time.Sleep(50 * time.Millisecond)
-	}
+	waitForKnownRelays(t, client, 3, nodes[1].PublicKey())
 	proxy, err := garlicproxy.Start(client, "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -165,7 +202,8 @@ func TestSiteBrowserAcrossDistributedMesh(t *testing.T) {
 	if response.StatusCode != http.StatusForbidden {
 		t.Fatalf("external host was not rejected: %d", response.StatusCode)
 	}
-	// Every published introduction point is a relay, not the service node.
+	// Every published introduction point is a relay, never the service
+	// node, and never the host's own guard.
 	points, err := client.LookupDomain(service.Domain())
 	if err != nil {
 		t.Fatal(err)
@@ -173,6 +211,18 @@ func TestSiteBrowserAcrossDistributedMesh(t *testing.T) {
 	for _, p := range points {
 		if bytes.Equal(p.NodeKey, nodes[0].PublicKey()) {
 			t.Fatal("directory disclosed the service node")
+		}
+		if bytes.Equal(p.NodeKey, nodes[1].PublicKey()) {
+			t.Fatal("the host's guard doubled as its site relay")
+		}
+	}
+	// No relay other than the host's trusted guard ever learned that the
+	// hidden host runs Garlic.
+	for i := 2; i < 4; i++ {
+		for _, p := range overlays[i].KnownPeers() {
+			if bytes.Equal(p.NodeKey, nodes[0].PublicKey()) || bytes.Equal(p.NodeKey, fresh.PublicKey()) {
+				t.Fatalf("relay %d learned about a hidden node", i)
+			}
 		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

@@ -16,13 +16,16 @@ func TestIdentityResponseIncludesSigningPublicKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewIdentity returned error: %v", err)
 	}
-	g := &Garlic{identity: id}
+	g := &Garlic{identity: id, cfg: Config{Hidden: true}}
 
 	resp := g.identityResponse()
 
-	wantPublicKey := hex.EncodeToString(id.PublicKey)
-	if resp["publicKey"] != wantPublicKey {
-		t.Errorf("publicKey = %q, want %q", resp["publicKey"], wantPublicKey)
+	// A hidden node has no onion key to advertise.
+	if resp["publicKey"] != "" {
+		t.Errorf("publicKey = %q, want empty for a hidden node", resp["publicKey"])
+	}
+	if resp["mode"] != "client" {
+		t.Errorf("mode = %q, want client", resp["mode"])
 	}
 	wantSigningPublicKey := hex.EncodeToString(id.SigningPublicKey)
 	if resp["signingPublicKey"] != wantSigningPublicKey {
@@ -31,7 +34,7 @@ func TestIdentityResponseIncludesSigningPublicKey(t *testing.T) {
 	if want := ComputeGID(id.SigningPublicKey, nil).Domain(); resp["domain"] != want {
 		t.Errorf("domain = %q, want %q", resp["domain"], want)
 	}
-	if len(resp) != 3 {
-		t.Errorf("identityResponse() has %d fields, want 3: %+v", len(resp), resp)
+	if _, ok := resp["onionKeyExpires"]; ok {
+		t.Errorf("hidden node reported an onion key expiry: %+v", resp)
 	}
 }

@@ -112,26 +112,38 @@ func (g *Garlic) processCircuitData(body []byte, msgType byte) circuitAction {
 		return circuitAction{kind: actionDrop}
 	}
 
-	secret, err := ECDH(g.identity.PrivateKey, ephemeralPub)
-	if err != nil {
-		g.security.authFailures.Add(1)
-		return circuitAction{kind: actionDrop}
+	// Try every onion key that is still valid (current and, during the
+	// grace period after a rotation, the previous one). A hidden node has
+	// none and therefore drops everything.
+	var keys [][]byte
+	if g.onion != nil {
+		keys = g.onion.privateKeys()
 	}
-
-	switch env.Version {
-	case EnvelopeVersion1:
-		return g.processCircuitDataLegacy(secret, env, msgType)
-	case EnvelopeVersion2:
-		a := g.processCircuitDataHopLocal(secret, env, msgType)
-		if msgType == msgTypeDuplexData && a.kind != actionDrop {
-			a.replyKey, _ = deriveReplyKey(secret)
+	for _, priv := range keys {
+		secret, err := ECDH(priv, ephemeralPub)
+		if err != nil {
+			continue
 		}
-		return a
-	default:
-		// Unreachable: Unmarshal already rejects any other Version.
-		g.security.malformedPackets.Add(1)
-		return circuitAction{kind: actionDrop}
+		var a circuitAction
+		var ok bool
+		switch env.Version {
+		case EnvelopeVersion1:
+			a, ok = g.processCircuitDataLegacy(secret, env, msgType)
+		case EnvelopeVersion2:
+			a, ok = g.processCircuitDataHopLocal(secret, env, msgType)
+			if ok && msgType == msgTypeDuplexData && a.kind != actionDrop {
+				a.replyKey, _ = deriveReplyKey(secret)
+			}
+		default:
+			g.security.malformedPackets.Add(1)
+			return circuitAction{kind: actionDrop}
+		}
+		if ok {
+			return a
+		}
 	}
+	g.security.authFailures.Add(1)
+	return circuitAction{kind: actionDrop}
 }
 
 // processCircuitDataLegacy handles an EnvelopeVersion1 message: unchanged
@@ -139,29 +151,27 @@ func (g *Garlic) processCircuitData(body []byte, msgType byte) circuitAction {
 // verbatim CircuitID/PacketCounter/Expiration forwarding). Kept only so
 // this node can still relay another, not-yet-upgraded peer's legacy
 // circuit - see EnvelopeVersion1's doc comment (envelope.go).
-func (g *Garlic) processCircuitDataLegacy(secret []byte, env *Envelope, msgType byte) circuitAction {
+func (g *Garlic) processCircuitDataLegacy(secret []byte, env *Envelope, msgType byte) (circuitAction, bool) {
 	circuitID := env.CircuitID
 	key, err := deriveLayerKey(secret)
 	if err != nil {
-		g.security.authFailures.Add(1)
-		return circuitAction{kind: actionDrop}
+		return circuitAction{kind: actionDrop}, false
 	}
 	// Wrong key (message wasn't encrypted for us), tampered
 	// ciphertext, or malformed plaintext all look identical here by
 	// design - see ErrNotForThisIdentity's doc comment.
 	layer, err := DecryptLayer(key, env.PacketCounter, env.Body)
 	if err != nil {
-		g.security.authFailures.Add(1)
-		return circuitAction{kind: actionDrop}
+		return circuitAction{kind: actionDrop}, false
 	}
 	if len(layer.NextHop) == 0 {
-		return circuitAction{kind: actionDeliver, circuitID: circuitID, payload: layer.Inner, tagged: msgType == msgTypeCircuitDataV3}
+		return circuitAction{kind: actionDeliver, circuitID: circuitID, payload: layer.Inner, tagged: msgType == msgTypeCircuitDataV3}, true
 	}
 	// A well-formed intermediate layer always carries the next hop's
 	// ephemeral key; anything else is malformed or malicious input,
 	// treated identically to any other unforwardable message.
 	if len(layer.NextHopEphemeral) != KeySize {
-		return circuitAction{kind: actionDrop}
+		return circuitAction{kind: actionDrop}, true
 	}
 	nextEnv := &Envelope{
 		Version:       EnvelopeVersion1,
@@ -180,13 +190,13 @@ func (g *Garlic) processCircuitDataLegacy(secret []byte, env *Envelope, msgType 
 	nextBytes, err := nextEnv.Marshal()
 	if err != nil {
 		g.security.malformedPackets.Add(1)
-		return circuitAction{kind: actionDrop}
+		return circuitAction{kind: actionDrop}, true
 	}
 	forwardMsg := make([]byte, 0, 1+KeySize+len(nextBytes))
 	forwardMsg = append(forwardMsg, msgType)
 	forwardMsg = append(forwardMsg, layer.NextHopEphemeral...)
 	forwardMsg = append(forwardMsg, nextBytes...)
-	return circuitAction{kind: actionForward, circuitID: circuitID, forwardTo: layer.NextHop, forwardMsg: forwardMsg}
+	return circuitAction{kind: actionForward, circuitID: circuitID, forwardTo: layer.NextHop, forwardMsg: forwardMsg}, true
 }
 
 // processCircuitDataHopLocal handles an EnvelopeVersion2 message:
@@ -195,26 +205,24 @@ func (g *Garlic) processCircuitDataLegacy(secret []byte, env *Envelope, msgType 
 // NextLocalCircuitID/NextLocalCounter/NextLocalExpiration instead of
 // copying env's own (incoming-leg) values. See
 // docs/superpowers/specs/2026-08-24-garlic-hop-local-metadata-design.md.
-func (g *Garlic) processCircuitDataHopLocal(secret []byte, env *Envelope, msgType byte) circuitAction {
+func (g *Garlic) processCircuitDataHopLocal(secret []byte, env *Envelope, msgType byte) (circuitAction, bool) {
 	circuitID := env.CircuitID
 	key, err := deriveLayerKeyHopLocal(secret)
 	if err != nil {
-		g.security.authFailures.Add(1)
-		return circuitAction{kind: actionDrop}
+		return circuitAction{kind: actionDrop}, false
 	}
 	layer, err := DecryptLayerHopLocal(key, env.PacketCounter, env.Body)
 	if err != nil {
-		g.security.authFailures.Add(1)
-		return circuitAction{kind: actionDrop}
+		return circuitAction{kind: actionDrop}, false
 	}
 	if len(layer.NextHop) == 0 {
-		return circuitAction{kind: actionDeliver, circuitID: circuitID, payload: layer.Inner, tagged: msgType == msgTypeCircuitDataV3}
+		return circuitAction{kind: actionDeliver, circuitID: circuitID, payload: layer.Inner, tagged: msgType == msgTypeCircuitDataV3}, true
 	}
 	if len(layer.NextHopEphemeral) != KeySize {
-		return circuitAction{kind: actionDrop}
+		return circuitAction{kind: actionDrop}, true
 	}
 	if len(layer.NextLocalCircuitID) != 16 {
-		return circuitAction{kind: actionDrop}
+		return circuitAction{kind: actionDrop}, true
 	}
 	var nextID CircuitID
 	copy(nextID[:], layer.NextLocalCircuitID)
@@ -231,13 +239,13 @@ func (g *Garlic) processCircuitDataHopLocal(secret []byte, env *Envelope, msgTyp
 	nextBytes, err := nextEnv.Marshal()
 	if err != nil {
 		g.security.malformedPackets.Add(1)
-		return circuitAction{kind: actionDrop}
+		return circuitAction{kind: actionDrop}, true
 	}
 	forwardMsg := make([]byte, 0, 1+KeySize+len(nextBytes))
 	forwardMsg = append(forwardMsg, msgType)
 	forwardMsg = append(forwardMsg, layer.NextHopEphemeral...)
 	forwardMsg = append(forwardMsg, nextBytes...)
-	return circuitAction{kind: actionForward, circuitID: circuitID, forwardTo: layer.NextHop, forwardMsg: forwardMsg, nextCircuitID: nextID}
+	return circuitAction{kind: actionForward, circuitID: circuitID, forwardTo: layer.NextHop, forwardMsg: forwardMsg, nextCircuitID: nextID}, true
 }
 
 // buildCircuitDataMessageHopLocal is buildCircuitDataMessage's
@@ -289,14 +297,11 @@ func (g *Garlic) processAnnounce(body []byte) {
 		return
 	}
 	for _, p := range msg.Peers {
-		if len(p.NodeKey) == 0 || len(p.GarlicPublicKey) == 0 {
+		info, err := parseVerifiedRelayInfo(p.RelayInfo, nil)
+		if err != nil {
 			continue
 		}
-		g.discovery.record(DiscoveredPeer{
-			NodeKey:         p.NodeKey,
-			GarlicPublicKey: p.GarlicPublicKey,
-			SelfVerified:    false,
-		})
+		g.rememberRelay(info, p.RelayInfo, false)
 	}
 }
 
@@ -329,19 +334,12 @@ func (g *Garlic) processCircuitDataBundle(body []byte) []circuitAction {
 	return actions
 }
 
-// processCapabilityRequest returns the marshaled CapabilityMessage this
-// node advertises in response to a capability request. It performs no I/O.
+// processCapabilityRequest returns this node's signed RelayInfo, or nil in
+// hidden mode (a hidden node never answers). It performs no network I/O.
 func (g *Garlic) processCapabilityRequest() []byte {
-	msg := &CapabilityMessage{
-		Versions:  []string{CapabilityGarlicV2, CapabilityGarlicV3, CapabilityAutoCircuit, CapabilitySites},
-		PublicKey: g.identity.PublicKey,
-	}
-	// A fixed, well-formed message built from this node's own identity
-	// can't fail to marshal (both fields are always within bounds), so a
-	// marshal error here would indicate a bug rather than bad input.
-	payload, err := msg.Marshal()
+	raw, _, err := g.selfRelayInfo()
 	if err != nil {
-		panic("garlic: failed to marshal own capability message: " + err.Error())
+		return nil
 	}
-	return payload
+	return raw
 }

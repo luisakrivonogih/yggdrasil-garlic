@@ -60,11 +60,10 @@ Check `nodeA.log`/`nodeB.log` for a line like:
 Your Garlic public key is 9434b21a22c8a361b36e341eb7b76b651ce495157936e74010971c10010bce52
 ```
 
-If you didn't set `Garlic.PrivateKey` in the config, you'll also see a
-warning that an ephemeral identity was generated for this run only — expected
-for a quick test; for a stable identity across restarts, generate a key
-once and put it in the config (see `docs/garlic-architecture.md` §1.1 for
-why this is a separate key from your main Yggdrasil identity).
+Onion keys are always ephemeral and rotate (see
+[garlic-quickstart.md](garlic-quickstart.md)); only `Garlic.SigningPrivateKey`
+is persistent. Relays need `Mode: "relay"`; every originator needs at least
+one `Garlic.TrustedPeers` entry, which is always the first hop.
 
 ## 3. Peer them
 
@@ -190,8 +189,8 @@ Two config notes before this works on a two-node loopback setup: set
 node as "too close", which on a two-node test is every candidate you
 have), and `Garlic.PathLength` to `1`. For the background pool and cover
 traffic, also set `Garlic.AutoPoolEnabled` to `true` — optionally with
-`Garlic.BootstrapPeers` listing the other node's key so the pool has a
-candidate at startup instead of waiting for gossip.
+`Garlic.TrustedPeers` listing the other node's key (required: the first
+hop is always a trusted peer).
 
 ```sh
 # nodeA must have verified nodeB itself first - a gossiped-only peer is

@@ -246,48 +246,9 @@ func (g *Garlic) createSiteCircuit(gateway []byte) (CircuitID, error) {
 }
 
 func (g *Garlic) createSiteCircuitContext(ctx context.Context, gateway []byte) (CircuitID, error) {
-	n := g.cfg.PathLength
-	if n < 1 || n > MaxPathLength {
-		return CircuitID{}, ErrInvalidPath
-	}
-	eligible := make(map[string]bool)
-	for i, p := range g.KnownPeers() {
-		if i >= 32 {
-			break
-		}
-		cap, err := g.queryCapabilityContext(ctx, p.NodeKey)
-		if err == nil && slices.Contains(cap.Versions, CapabilitySites) {
-			eligible[string(p.NodeKey)] = true
-		}
-	}
-	candidates := g.candidatePool()
-	filtered := make([]HopCandidate, 0, len(candidates))
-	for _, p := range candidates {
-		if !bytes.Equal(p.NodeKey, gateway) && eligible[string(p.NodeKey)] {
-			filtered = append(filtered, p)
-		}
-	}
-	var nodes [][]byte
-	if n > 1 {
-		path, err := SelectPathWithGuardPolicy(filtered, n-1, g.cfg.MinHopCount)
-		if err != nil {
-			return CircuitID{}, err
-		}
-		for _, p := range path {
-			nodes = append(nodes, p.NodeKey)
-		}
-	}
-	nodes = append(nodes, bytes.Clone(gateway))
-	path := make([]CapabilityMessage, len(nodes))
-	for i, key := range nodes {
-		cap, err := g.queryCapabilityContext(ctx, key)
-		if err != nil {
-			return CircuitID{}, err
-		}
-		if !slices.Contains(cap.Versions, CapabilitySites) {
-			return CircuitID{}, errors.New("garlic: site circuit hop needs garlic-sites-v1")
-		}
-		path[i] = *cap
+	path, nodes, err := g.buildPath(ctx, g.cfg.PathLength, gateway, needSites)
+	if err != nil {
+		return CircuitID{}, err
 	}
 	return g.CreateCircuit(path, nodes)
 }

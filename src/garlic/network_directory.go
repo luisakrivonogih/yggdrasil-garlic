@@ -52,25 +52,36 @@ func newNetworkRendezvous(g *Garlic) *NetworkRendezvous {
 func (d *NetworkRendezvous) discover() {
 	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
+	// Peers that did not answer (hidden or non-Garlic nodes) are not asked
+	// again for a while, so they do not stall this loop on every tick.
+	silent := map[string]time.Time{}
 	for {
 		select {
 		case <-d.g.stop:
 			return
 		case <-t.C:
-			for i, p := range d.g.core.GetPeers() {
+			// Hidden nodes contact only their trusted peers; relays also
+			// contact their direct mesh peers.
+			for i, key := range d.g.contactablePeers() {
 				if i >= 32 {
 					break
-				}
-				if !p.Up || len(p.Key) != 32 {
-					continue
 				}
 				select {
 				case <-d.g.stop:
 					return
 				default:
 				}
-				if cap, err := d.g.QueryCapability(p.Key); err == nil && slices.Contains(cap.Versions, CapabilitySites) {
-					_ = d.g.RequestGossip(p.Key)
+				if until, ok := silent[string(key)]; ok && time.Now().Before(until) {
+					continue
+				}
+				cap, err := d.g.QueryCapability(key)
+				if err != nil {
+					silent[string(key)] = time.Now().Add(5 * time.Minute)
+					continue
+				}
+				delete(silent, string(key))
+				if slices.Contains(cap.Versions, CapabilitySites) {
+					_ = d.g.RequestGossip(key)
 				}
 			}
 			d.mu.Lock()
@@ -100,6 +111,7 @@ func cloneDescriptor(r *ServiceDescriptor) *ServiceDescriptor {
 	c.IntroPoints = make([]IntroPoint, len(r.IntroPoints))
 	for i, p := range r.IntroPoints {
 		c.IntroPoints[i].NodeKey = bytes.Clone(p.NodeKey)
+		c.IntroPoints[i].RelayInfo = bytes.Clone(p.RelayInfo)
 	}
 	return &c
 }
@@ -136,6 +148,9 @@ func validateNetworkDescriptor(record *ServiceDescriptor, gid GID) error {
 		if len(p.NodeKey) != 32 {
 			return ErrInvalidPath
 		}
+		if _, err := parseVerifiedRelayInfo(p.RelayInfo, p.NodeKey); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -168,16 +183,20 @@ func closestDirectoryNodes(gid GID, nodes map[string][]byte, n int) [][]byte {
 	return all
 }
 
+// seeds are the directory nodes this node can build circuits to: relays
+// with usable verified relay information, plus itself in relay mode.
+// Hidden nodes never act as directory storage.
 func (d *NetworkRendezvous) seeds() map[string][]byte {
-	nodes := map[string][]byte{string(d.g.core.PublicKey()): d.g.core.PublicKey()}
-	for _, p := range d.g.KnownPeers() {
-		if len(p.NodeKey) == 32 {
-			nodes[string(p.NodeKey)] = p.NodeKey
-		}
+	nodes := map[string][]byte{}
+	if !d.g.cfg.Hidden {
+		nodes[string(d.g.core.PublicKey())] = d.g.core.PublicKey()
 	}
-	for _, p := range d.g.core.GetPeers() {
-		if p.Up && len(p.Key) == 32 {
-			nodes[string(p.Key)] = p.Key
+	for _, p := range d.g.KnownPeers() {
+		if len(p.NodeKey) != 32 {
+			continue
+		}
+		if c, ok := d.g.knownRelay(p.NodeKey); ok && needSites(c) {
+			nodes[string(p.NodeKey)] = p.NodeKey
 		}
 	}
 	return nodes
@@ -197,7 +216,13 @@ func (d *NetworkRendezvous) handleRequest(circuit CircuitID, body []byte) {
 		res.Stored = d.store(req.GID, req.Store)
 	}
 	res.Record = d.local(req.GID)
-	res.Peers = closestDirectoryNodes(req.GID, d.seeds(), directoryWidth)
+	// Referrals carry each node's signed RelayInfo so the requester can
+	// build circuits to them without contacting them first.
+	for _, key := range closestDirectoryNodes(req.GID, d.seeds(), directoryWidth) {
+		if raw := d.g.relayInfoRaw(key); raw != nil {
+			res.Peers = append(res.Peers, raw)
+		}
+	}
 	data, err := json.Marshal(res)
 	if err != nil || len(data) > maxSiteDatagram-1 {
 		return
@@ -279,7 +304,10 @@ func (d *NetworkRendezvous) walk(ctx context.Context, gid GID) ([][]byte, *Servi
 	nodes := d.seeds()
 	self := string(d.g.core.PublicKey())
 	visited := map[string]bool{self: true}
-	reachable := map[string][]byte{self: d.g.core.PublicKey()}
+	reachable := map[string][]byte{}
+	if !d.g.cfg.Hidden {
+		reachable[self] = d.g.core.PublicKey()
+	}
 	best := d.local(gid)
 	for queries := 0; queries < 24; {
 		var batch [][]byte
@@ -311,10 +339,15 @@ func (d *NetworkRendezvous) walk(ctx context.Context, gid GID) ([][]byte, *Servi
 				continue
 			}
 			reachable[string(r.peer)] = r.peer
-			for _, peer := range r.res.Peers {
-				if len(peer) == 32 && len(nodes) < 256 {
-					nodes[string(peer)] = peer
+			for _, raw := range r.res.Peers {
+				if len(nodes) >= 256 {
+					break
 				}
+				info, err := d.g.learnRelayInfo(raw, nil)
+				if err != nil || !needSites(&info.Capability) {
+					continue
+				}
+				nodes[string(info.NodeKey)] = bytes.Clone(info.NodeKey)
 			}
 			if record := r.res.Record; validateNetworkDescriptor(record, gid) == nil && (best == nil || record.PublishedAt > best.PublishedAt || (record.PublishedAt == best.PublishedAt && record.ExpiresAt > best.ExpiresAt)) {
 				best = record

@@ -638,3 +638,46 @@ Internet domains directly, so those destinations are outside Garlic.
 An ordinary browser's speculative networking, extensions, fingerprinting
 and storage isolation are not controlled by this code. No Tor Browser
 equivalence or claim of absolute anonymity is made.
+
+## Hidden mode, trusted guards and onion key rotation (2026-11)
+
+This section supersedes the earlier statements about guard selection and
+long-term X25519 identities.
+
+**Membership enumeration.** Previously every Garlic node answered capability
+requests from anyone, so walking the Yggdrasil tree enumerated every Garlic
+user, including site hosts (and their uptime). Nodes now default to hidden
+mode (`Mode: "client"`): they answer no capability or gossip requests, relay
+nothing, hold no onion key and store no directory records, and are
+indistinguishable from nodes that do not run Garlic. Only relays
+(`Mode: "relay"`) are public. Sites can only be hosted by hidden nodes
+unless `AllowServicesOnRelay` is set.
+
+**First hop.** The first hop of every circuit is a trusted peer
+(`TrustedPeers`, by Yggdrasil node key) and the chosen guard is kept while
+it works. There is no fallback to an untrusted first hop. The guard is
+never the terminal hop of the same circuit, and a site host never uses its
+guard as the site's relay.
+
+**No direct contact with non-guard hops.** Originators previously sent a
+capability request to every hop right before building a circuit through
+it, revealing their node key to every hop. Relays now publish a
+`RelayInfo` (onion key, versions, validity) signed with their Yggdrasil
+node key under a dedicated domain-separation prefix. It travels through
+gossip, directory referrals and site descriptors and is verified locally;
+only the trusted guard is ever contacted directly. A gossiping peer can
+withhold relays (eclipse) but cannot forge or alter onion keys.
+
+**Forward secrecy.** Onion keys are generated in memory, never persisted,
+rotated every `OnionKeyRotation` (default 1h) and wiped after a grace
+period (default another hour, at least circuit lifetime plus packet TTL).
+Compromise of a relay after a key is wiped does not expose previously
+recorded traffic through that relay. Originators only use a key that
+outlives the circuit they build. This is rotation-granular forward secrecy,
+not Tor's per-circuit ntor; a telescoping handshake remains possible future
+work. End-to-end site traffic additionally uses TLS 1.3.
+
+**Remaining limits.** A malicious trusted peer learns that you use Garlic and
+can bias which relays you learn about; choose trusted peers you operate or
+trust. Entry/exit traffic correlation by one adversary controlling both ends
+remains possible. In a small network the anonymity set is small.

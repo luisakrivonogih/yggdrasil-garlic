@@ -75,6 +75,7 @@ func FuzzProcessCircuitData(f *testing.F) {
 	}
 	g := &Garlic{
 		identity:   id,
+		onion:      testOnion(id),
 		cfg:        DefaultConfig(),
 		relayState: newRelayCircuitState(1024),
 		delivered:  make(chan DeliveredMessage, 256),

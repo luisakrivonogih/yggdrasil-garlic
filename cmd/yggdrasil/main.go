@@ -131,7 +131,6 @@ func main() {
 		if genErr != nil {
 			panic(genErr)
 		}
-		cfg.Garlic.PrivateKey = identity.PrivateKey
 		cfg.Garlic.SigningPrivateKey = identity.SigningPrivateKey.Seed()
 		cfg.AdminListen = ""
 		var bs []byte
@@ -307,40 +306,36 @@ func main() {
 	// Garlic support at all. See docs/garlic-architecture.md.
 	{
 		if cfg.Garlic.Enabled {
-			var identity *garlic.Identity
-			switch {
-			case len(cfg.Garlic.PrivateKey) > 0 && len(cfg.Garlic.SigningPrivateKey) > 0:
-				if identity, err = garlic.LoadIdentityFromPrivateKeys(cfg.Garlic.PrivateKey, cfg.Garlic.SigningPrivateKey); err != nil {
+			// Onion (X25519) keys are always ephemeral and rotate in
+			// memory; only the site signing key is persistent.
+			identity, err := garlic.NewIdentity()
+			if err != nil {
+				panic(err)
+			}
+			if len(cfg.Garlic.SigningPrivateKey) > 0 {
+				if identity, err = garlic.LoadIdentityFromPrivateKeys(identity.PrivateKey, cfg.Garlic.SigningPrivateKey); err != nil {
 					panic(err)
 				}
-			case len(cfg.Garlic.PrivateKey) > 0:
-				// Upgrade path: a node that was already running Garlic
-				// before Garlic.SigningPrivateKey existed has
-				// Garlic.PrivateKey configured but not the new signing
-				// key. Keep the existing X25519 identity stable and
-				// generate only a fresh signing identity for this run -
-				// regenerating both would silently reset an already-
-				// stable Garlic identity on every restart, not just add
-				// a new one.
-				if identity, err = garlic.LoadIdentityFromPrivateKey(cfg.Garlic.PrivateKey); err != nil {
-					panic(err)
-				}
-				logger.Warnln("Garlic.PrivateKey configured but no Garlic.SigningPrivateKey - generated a fresh signing identity for this run only; your Garlic X25519 identity remains stable")
-			case len(cfg.Garlic.SigningPrivateKey) > 0:
-				_, privateKey, keyErr := garlic.GenerateKeypair()
-				if keyErr != nil {
-					panic(keyErr)
-				}
-				identity, err = garlic.LoadIdentityFromPrivateKeys(privateKey, cfg.Garlic.SigningPrivateKey)
-				if err != nil {
-					panic(err)
-				}
-				logger.Warnln("No Garlic.PrivateKey configured - generated an ephemeral X25519 key; the configured signing key keeps your domains stable")
+			} else if len(cfg.Garlic.Services) > 0 {
+				logger.Warnln("No Garlic.SigningPrivateKey configured - your site domains will change on every restart")
+			}
+			var hidden bool
+			switch strings.ToLower(strings.TrimSpace(cfg.Garlic.Mode)) {
+			case "", "client", "hidden":
+				hidden = true
+			case "relay":
+				hidden = false
 			default:
-				if identity, err = garlic.NewIdentity(); err != nil {
-					panic(err)
-				}
-				logger.Warnln("No Garlic.PrivateKey/SigningPrivateKey configured - generated ephemeral Garlic identity keys for this run only")
+				panic(fmt.Sprintf("invalid Garlic.Mode %q (want \"client\" or \"relay\")", cfg.Garlic.Mode))
+			}
+			rotation, err := time.ParseDuration(cfg.Garlic.OnionKeyRotation)
+			if err != nil {
+				panic(fmt.Sprintf("invalid Garlic.OnionKeyRotation %q: %v", cfg.Garlic.OnionKeyRotation, err))
+			}
+			trustedPeers := append([]string(nil), cfg.Garlic.TrustedPeers...)
+			if len(cfg.Garlic.BootstrapPeers) > 0 {
+				logger.Warnln("Garlic.BootstrapPeers is deprecated - treating its entries as Garlic.TrustedPeers")
+				trustedPeers = append(trustedPeers, cfg.Garlic.BootstrapPeers...)
 			}
 			lifetime, err := time.ParseDuration(cfg.Garlic.CircuitLifetime)
 			if err != nil {
@@ -364,7 +359,11 @@ func main() {
 			}
 			gcfg.MaxDiscoveredPeers = cfg.Garlic.MaxDiscoveredPeers
 			gcfg.MinHopCount = cfg.Garlic.MinHopCount
-			gcfg.BootstrapPeers = cfg.Garlic.BootstrapPeers
+			gcfg.Hidden = hidden
+			gcfg.TrustedPeers = trustedPeers
+			gcfg.TrustOutboundPeers = cfg.Garlic.TrustOutboundPeers
+			gcfg.OnionKeyRotation = rotation
+			gcfg.AllowServicesOnRelay = cfg.Garlic.AllowServicesOnRelay
 			gcfg.AutoPoolEnabled = cfg.Garlic.AutoPoolEnabled
 			gcfg.AutoPoolSize = cfg.Garlic.AutoPoolSize
 			if gcfg.AutoRotationInterval, err = time.ParseDuration(cfg.Garlic.AutoRotationInterval); err != nil {
@@ -375,7 +374,14 @@ func main() {
 				panic(fmt.Sprintf("invalid Garlic.CoverTrafficInterval %q: %v", cfg.Garlic.CoverTrafficInterval, err))
 			}
 			n.garlic = garlic.New(n.core, identity, gcfg, nil)
-			logger.Printf("Your Garlic public key is %s", hex.EncodeToString(identity.PublicKey))
+			logger.Printf("Garlic mode: %s", n.garlic.Mode())
+			if len(trustedPeers) == 0 && !gcfg.TrustOutboundPeers {
+				if hidden {
+					logger.Warnln("Garlic: no Garlic.TrustedPeers configured - no circuits can be built until you add one (yggdrasilctl addGarlicPeer key=<relay node key>)")
+				} else {
+					logger.Println("Garlic relay: no Garlic.TrustedPeers - relaying works; this node will not originate circuits of its own")
+				}
+			}
 			logger.Printf("Your Garlic default domain is %s", garlic.ComputeGID(identity.SigningPublicKey, nil).Domain())
 			if n.admin != nil {
 				n.garlic.SetupAdminHandlers(n.admin)
@@ -390,7 +396,8 @@ func main() {
 			for _, service := range cfg.Garlic.Services {
 				host, err := n.garlic.StartService(garlic.ServiceConfig{ServiceID: service.ServiceID, LocalAddr: service.LocalAddr, TLSLocalAddr: service.TLSLocalAddr})
 				if err != nil {
-					panic(err)
+					logger.Errorf("Garlic website not started: %v", err)
+					continue
 				}
 				logger.Printf("Garlic website starting: http://%s/", host.Domain())
 				go func() {

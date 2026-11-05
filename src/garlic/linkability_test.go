@@ -18,6 +18,7 @@ import (
 func hopGarlicFor(id *Identity) *Garlic {
 	return &Garlic{
 		identity:   id,
+		onion:      testOnion(id),
 		cfg:        DefaultConfig(),
 		relayState: newRelayCircuitState(1024),
 		delivered:  make(chan DeliveredMessage, 16),

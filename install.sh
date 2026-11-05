@@ -28,11 +28,12 @@
 #                     (never touches a distro nodejs package), since the
 #                     systemd-managed yggdrasil execs `node` directly and
 #                     must find it on PATH.
-#   GARLIC_BOOTSTRAP_PEERS  comma-separated hex-encoded node keys of a few
-#                     known Garlic-capable peers, written into
-#                     Garlic.BootstrapPeers so this node's candidate pool
-#                     starts non-empty (default: empty - a freshly-installed
-#                     first node has nobody to bootstrap from yet).
+#   GARLIC_MODE       "relay" (default for this server installer: a public
+#                     Garlic relay) or "client" (hidden node, e.g. for a
+#                     server that only hosts a site).
+#   GARLIC_TRUSTED_PEERS  comma-separated Yggdrasil node keys ("Public key"
+#                     from getSelf) of Garlic relays you trust as first hop,
+#                     written into Garlic.TrustedPeers.
 #
 # See docs/garlic-testing.md for how to actually exercise Garlic (build a
 # circuit, send/receive a payload) once this has installed and started it -
@@ -46,7 +47,8 @@ REPO_BRANCH=${REPO_BRANCH:-develop}
 WORKDIR=${WORKDIR:-/opt/yggdrasil-installer}
 ENABLE_GARLIC=${ENABLE_GARLIC:-1}
 ENABLE_DASHBOARD=${ENABLE_DASHBOARD:-1}
-GARLIC_BOOTSTRAP_PEERS=${GARLIC_BOOTSTRAP_PEERS:-}
+GARLIC_MODE=${GARLIC_MODE:-relay}
+GARLIC_TRUSTED_PEERS=${GARLIC_TRUSTED_PEERS:-${GARLIC_BOOTSTRAP_PEERS:-}}
 
 log() { echo "==> $*"; }
 die() { echo "error: $*" >&2; exit 1; }
@@ -269,6 +271,19 @@ case "$PKGKIND" in
     ;;
 esac
 
+# Resolve the installed binaries by absolute path and make sure they run -
+# a missing or wrong-architecture binary otherwise only shows up later as
+# "yggdrasil: not found" or a systemd 203/EXEC failure.
+YGG=$(command -v yggdrasil 2>/dev/null || true)
+YGGCTL=$(command -v yggdrasilctl 2>/dev/null || true)
+for c in /usr/bin /usr/local/bin /usr/sbin; do
+  [ -n "$YGG" ] || { [ -x "$c/yggdrasil" ] && YGG="$c/yggdrasil"; }
+  [ -n "$YGGCTL" ] || { [ -x "$c/yggdrasilctl" ] && YGGCTL="$c/yggdrasilctl"; }
+done
+[ -n "$YGG" ] || die "yggdrasil binary not found after installing $PKGFILE - inspect it with: dpkg -c $PKGFILE (or rpm -qlp $PKGFILE)"
+"$YGG" -version >/dev/null 2>&1 || die "$YGG does not run on this machine (wrong architecture?) - check: file $YGG"
+log "Installed $("$YGG" -version | tr '\n' ' ')at $YGG"
+
 # The package's postinstall step already generated /etc/yggdrasil/yggdrasil.conf
 # (Garlic disabled, the project default) and started the service - see
 # contrib/deb/generate.sh's postinst / contrib/rpm/generate.sh's %post.
@@ -287,24 +302,25 @@ if [ "$ENABLE_DASHBOARD" = "1" ]; then
 fi
 
 # ---- 10. Enable Garlic / the dashboard ----
-if [ "$ENABLE_GARLIC" = "1" ] || [ "$ENABLE_DASHBOARD" = "1" ] || [ -n "$GARLIC_BOOTSTRAP_PEERS" ]; then
-  log "Updating /etc/yggdrasil/yggdrasil.conf (Garlic=$ENABLE_GARLIC, Dashboard=$ENABLE_DASHBOARD)"
+if [ "$ENABLE_GARLIC" = "1" ] || [ "$ENABLE_DASHBOARD" = "1" ] || [ -n "$GARLIC_TRUSTED_PEERS" ]; then
+  log "Updating /etc/yggdrasil/yggdrasil.conf (Garlic=$ENABLE_GARLIC, Mode=$GARLIC_MODE, Dashboard=$ENABLE_DASHBOARD)"
   TMP_JSON="$WORKDIR/yggdrasil.json"
   mkdir -p "$WORKDIR"
-  yggdrasil -useconffile /etc/yggdrasil/yggdrasil.conf -normaliseconf -json > "$TMP_JSON"
+  "$YGG" -useconffile /etc/yggdrasil/yggdrasil.conf -normaliseconf -json > "$TMP_JSON"
 
   EDITED=0
   if command -v jq >/dev/null 2>&1; then
     jq --argjson garlic "$([ "$ENABLE_GARLIC" = "1" ] && echo true || echo false)" \
        --argjson dash "$([ "$ENABLE_DASHBOARD" = "1" ] && echo true || echo false)" \
-       --arg bootstrap "$GARLIC_BOOTSTRAP_PEERS" \
+       --arg trusted "$GARLIC_TRUSTED_PEERS" \
+       --arg mode "$GARLIC_MODE" \
        '.Garlic.Enabled = (if $garlic then true else .Garlic.Enabled end)
+        | .Garlic.Mode = $mode
         | .Dashboard.Enabled = (if $dash then true else .Dashboard.Enabled end)
-        | .Garlic.BootstrapPeers = (if $bootstrap != "" then ($bootstrap | split(",")) else .Garlic.BootstrapPeers end)
-        | .Garlic.AutoPoolEnabled = (if $bootstrap != "" then true else .Garlic.AutoPoolEnabled end)' \
+        | .Garlic.TrustedPeers = (if $trusted != "" then ((.Garlic.TrustedPeers // []) + ($trusted | split(",")) | unique) else .Garlic.TrustedPeers end)' \
        "$TMP_JSON" > "$TMP_JSON.new" && EDITED=1
   elif command -v python3 >/dev/null 2>&1; then
-    ENABLE_GARLIC="$ENABLE_GARLIC" ENABLE_DASHBOARD="$ENABLE_DASHBOARD" GARLIC_BOOTSTRAP_PEERS="$GARLIC_BOOTSTRAP_PEERS" python3 - "$TMP_JSON" > "$TMP_JSON.new" <<'PY' && EDITED=1
+    ENABLE_GARLIC="$ENABLE_GARLIC" ENABLE_DASHBOARD="$ENABLE_DASHBOARD" GARLIC_TRUSTED_PEERS="$GARLIC_TRUSTED_PEERS" GARLIC_MODE="$GARLIC_MODE" python3 - "$TMP_JSON" > "$TMP_JSON.new" <<'PY' && EDITED=1
 import json, os, sys
 with open(sys.argv[1]) as f:
     cfg = json.load(f)
@@ -312,27 +328,24 @@ if os.environ.get("ENABLE_GARLIC") == "1":
     cfg.setdefault("Garlic", {})["Enabled"] = True
 if os.environ.get("ENABLE_DASHBOARD") == "1":
     cfg.setdefault("Dashboard", {})["Enabled"] = True
-GARLIC_BOOTSTRAP_PEERS = os.environ.get("GARLIC_BOOTSTRAP_PEERS", "")
-if GARLIC_BOOTSTRAP_PEERS:
-    cfg.setdefault("Garlic", {})["BootstrapPeers"] = GARLIC_BOOTSTRAP_PEERS.split(",")
-    # Setting bootstrap peers is the operator's explicit signal that they
-    # want the auto-pool actually running, not just seeded - AutoPoolEnabled
-    # defaults to false (a node can relay/terminate for others' auto-pool
-    # circuits without originating its own), so it needs an explicit push.
-    cfg.setdefault("Garlic", {})["AutoPoolEnabled"] = True
+garlic = cfg.setdefault("Garlic", {})
+garlic["Mode"] = os.environ.get("GARLIC_MODE", "relay")
+trusted = [k.strip() for k in os.environ.get("GARLIC_TRUSTED_PEERS", "").split(",") if k.strip()]
+if trusted:
+    garlic["TrustedPeers"] = sorted(set((garlic.get("TrustedPeers") or []) + trusted))
 json.dump(cfg, sys.stdout, indent=2)
 PY
   fi
 
   if [ "$EDITED" = "1" ] && [ -s "$TMP_JSON.new" ]; then
-    yggdrasil -useconffile "$TMP_JSON.new" -normaliseconf > /etc/yggdrasil/yggdrasil.conf
+    "$YGG" -useconffile "$TMP_JSON.new" -normaliseconf > /etc/yggdrasil/yggdrasil.conf
     chown root:yggdrasil /etc/yggdrasil/yggdrasil.conf
     chmod 640 /etc/yggdrasil/yggdrasil.conf
     rm -f "$TMP_JSON" "$TMP_JSON.new"
     systemctl restart yggdrasil
     log "Config updated, yggdrasil restarted"
   else
-    log "Neither jq nor python3 found - enable manually: set \"Garlic\": { \"Enabled\": true } and/or \"Dashboard\": { \"Enabled\": true } (and, if bootstrapping, \"Garlic\": { \"BootstrapPeers\": [...], \"AutoPoolEnabled\": true }) in /etc/yggdrasil/yggdrasil.conf, then run 'systemctl restart yggdrasil'"
+    log "Neither jq nor python3 found - enable manually: set \"Garlic\": { \"Enabled\": true } and/or \"Dashboard\": { \"Enabled\": true } (and \"Mode\": \"relay\", \"TrustedPeers\": [...]) in /etc/yggdrasil/yggdrasil.conf, then run 'systemctl restart yggdrasil'"
   fi
 fi
 
@@ -347,13 +360,13 @@ fi
 
 echo
 echo "--- Yggdrasil node ---"
-yggdrasilctl getself || true
+"$YGGCTL" getself || true
 echo
 echo "--- Garlic identity (present only if Garlic started successfully) ---"
-yggdrasilctl getGarlicIdentity || true
+"$YGGCTL" getGarlicIdentity || true
 echo
-echo "--- Garlic stats ---"
-yggdrasilctl getGarlicStats || true
+echo "--- Garlic peers ---"
+"$YGGCTL" getGarlicPeers || true
 if [ "$ENABLE_DASHBOARD" = "1" ]; then
   echo
   echo "--- Dashboard ---"

@@ -31,3 +31,21 @@ func (c *Core) getGarlicHandler() GarlicHandler {
 	}
 	return nil
 }
+
+// GarlicSignaturePrefix domain-separates every statement this node signs
+// for the Garlic overlay (see SignGarlic) from anything else ever signed
+// with the same Yggdrasil key, so a Garlic signature can never be replayed
+// as a mesh-protocol signature or vice versa.
+const GarlicSignaturePrefix = "yggdrasil-garlic-node-statement-v1\x00"
+
+// SignGarlic signs statement with this node's Yggdrasil private key under
+// GarlicSignaturePrefix. src/garlic uses it to bind a relay's rotating
+// onion key to its node key, so other nodes can verify that binding from
+// gossip without contacting the relay directly. Verify with
+// ed25519.Verify(nodeKey, append([]byte(GarlicSignaturePrefix), statement...), sig).
+func (c *Core) SignGarlic(statement []byte) []byte {
+	msg := make([]byte, 0, len(GarlicSignaturePrefix)+len(statement))
+	msg = append(msg, GarlicSignaturePrefix...)
+	msg = append(msg, statement...)
+	return ed25519.Sign(c.secret, msg)
+}

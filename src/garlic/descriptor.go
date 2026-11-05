@@ -27,6 +27,10 @@ const (
 
 const ServiceDescriptorVersion1 uint8 = 1
 
+// ServiceDescriptorVersion2 adds each introduction relay's signed
+// RelayInfo, so clients never contact the relay before building a circuit.
+const ServiceDescriptorVersion2 uint8 = 2
+
 var (
 	ErrServiceIDTooLarge            = errors.New("garlic: service ID exceeds maximum size")
 	ErrUnsupportedDescriptorVersion = errors.New("garlic: unsupported service descriptor version")
@@ -79,6 +83,13 @@ func (d *ServiceDescriptor) signedBytes() ([]byte, error) {
 		}
 		buf = append(buf, byte(len(p.NodeKey)))
 		buf = append(buf, p.NodeKey...)
+		if d.Version >= ServiceDescriptorVersion2 {
+			if len(p.RelayInfo) > maxRelayInfoSize {
+				return nil, ErrRelayInfoTooLarge
+			}
+			buf = binary.BigEndian.AppendUint16(buf, uint16(len(p.RelayInfo)))
+			buf = append(buf, p.RelayInfo...)
+		}
 	}
 	buf = binary.BigEndian.AppendUint64(buf, d.PublishedAt)
 	buf = binary.BigEndian.AppendUint64(buf, d.ExpiresAt)
@@ -99,7 +110,7 @@ func unmarshalServiceDescriptorFields(data []byte) (*ServiceDescriptor, error) {
 		return nil, ErrDescriptorTruncated
 	}
 	d := &ServiceDescriptor{Version: data[0]}
-	if d.Version != ServiceDescriptorVersion1 {
+	if d.Version != ServiceDescriptorVersion1 && d.Version != ServiceDescriptorVersion2 {
 		return nil, ErrUnsupportedDescriptorVersion
 	}
 	rest := data[1:]
@@ -141,8 +152,26 @@ func unmarshalServiceDescriptorFields(data []byte) (*ServiceDescriptor, error) {
 		if n > len(rest) {
 			return nil, ErrDescriptorTruncated
 		}
-		d.IntroPoints = append(d.IntroPoints, IntroPoint{NodeKey: append([]byte(nil), rest[:n]...)})
+		point := IntroPoint{NodeKey: append([]byte(nil), rest[:n]...)}
 		rest = rest[n:]
+		if d.Version >= ServiceDescriptorVersion2 {
+			if len(rest) < 2 {
+				return nil, ErrDescriptorTruncated
+			}
+			m := int(binary.BigEndian.Uint16(rest[:2]))
+			rest = rest[2:]
+			if m > maxRelayInfoSize {
+				return nil, ErrRelayInfoTooLarge
+			}
+			if m > len(rest) {
+				return nil, ErrDescriptorTruncated
+			}
+			if m > 0 {
+				point.RelayInfo = append([]byte(nil), rest[:m]...)
+			}
+			rest = rest[m:]
+		}
+		d.IntroPoints = append(d.IntroPoints, point)
 	}
 
 	if len(rest) < 16 {
@@ -161,7 +190,7 @@ func SignServiceDescriptor(signingPublicKey ed25519.PublicKey, signingPrivateKey
 		return nil, ErrDescriptorLifetimeTooLong
 	}
 	d := &ServiceDescriptor{
-		Version:          ServiceDescriptorVersion1,
+		Version:          ServiceDescriptorVersion2,
 		ServicePublicKey: signingPublicKey,
 		ServiceID:        serviceID,
 		IntroPoints:      introPoints,
@@ -192,7 +221,7 @@ func SignServiceDescriptor(signingPublicKey ed25519.PublicKey, signingPrivateKey
 // stops a self-signed, unreasonably-long-lived descriptor from being
 // trusted.
 func VerifyServiceDescriptor(d *ServiceDescriptor, gid GID, now uint64) error {
-	if d.Version != ServiceDescriptorVersion1 {
+	if d.Version != ServiceDescriptorVersion1 && d.Version != ServiceDescriptorVersion2 {
 		return ErrUnsupportedDescriptorVersion
 	}
 	if ComputeGID(d.ServicePublicKey, d.ServiceID) != gid {

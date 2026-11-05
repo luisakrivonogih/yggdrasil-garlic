@@ -21,8 +21,16 @@ false` (the default) behaves exactly like vanilla Yggdrasil, and ordinary
 Yggdrasil nodes transparently carry Garlic traffic without needing to know
 it exists or upgrading anything.
 
+Nodes run in hidden mode by default (`Garlic.Mode: "client"`): they answer
+no Garlic queries and relay nothing, so they cannot be enumerated. Servers
+run `Mode: "relay"`. The first hop of every circuit is one of your
+`Garlic.TrustedPeers`; other hops are chosen from signed relay information
+and never contacted directly; relay onion keys rotate hourly and are wiped.
+Operator guide (Russian): [docs/garlic-quickstart.md](docs/garlic-quickstart.md).
+
 Start here:
 
+- [docs/garlic-quickstart.md](docs/garlic-quickstart.md) - install, trusted peers, hosting a .yggg site
 - [docs/garlic-architecture.md](docs/garlic-architecture.md) - design and integration rationale
 - [docs/garlic-protocol.md](docs/garlic-protocol.md) - wire format, what's actually implemented
 - [docs/garlic-threat-model.md](docs/garlic-threat-model.md) - what this does and does not protect against (read before relying on it for anything)
@@ -46,7 +54,9 @@ way the official packages install (systemd service,
 generated config, restarts the service, and prints the resulting Garlic
 identity and stats so you can confirm it actually started. See
 [install.sh](install.sh) for the environment variables it honors
-(`REPO_URL`, `REPO_BRANCH`, `WORKDIR`, `ENABLE_GARLIC`), and
+(`REPO_URL`, `REPO_BRANCH`, `WORKDIR`, `ENABLE_GARLIC`, `GARLIC_MODE` -
+`relay` by default for servers, `GARLIC_TRUSTED_PEERS`). On macOS the same
+script builds from source and installs a launchd service, and
 [docs/garlic-testing.md](docs/garlic-testing.md) for how to build a circuit
 and send traffic through it once the service is running.
 

@@ -484,8 +484,8 @@ type. The `GossipAnnounce` reply it triggers is bounded to
 `AnnounceMessage.Marshal` enforces on any `msgTypeAnnounce` body,
 pull-triggered or not.
 
-`Config.BootstrapPeers` (hex-encoded node keys) drives this
-automatically: for each configured entry, `Garlic.bootstrap()` (run once,
+`Config.TrustedPeers` (hex-encoded node keys; formerly `BootstrapPeers`)
+drives this automatically: for each configured entry, `Garlic.bootstrap()` (run once,
 in its own goroutine, from `New`) retries `QueryCapability` up to
 `bootstrapMaxAttempts` (3) times and, on success, calls `RequestGossip` —
 the one manual step an operator performs, analogous to Yggdrasil's own

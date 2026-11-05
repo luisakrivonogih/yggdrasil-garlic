@@ -70,6 +70,9 @@ func siteCertificate(id *Identity, domain string) (tls.Certificate, error) {
 }
 
 func (g *Garlic) StartService(cfg ServiceConfig) (*HostedService, error) {
+	if !g.cfg.Hidden && !g.cfg.AllowServicesOnRelay {
+		return nil, ErrServiceOnRelay
+	}
 	serviceID, err := hex.DecodeString(cfg.ServiceID)
 	if err != nil {
 		return nil, fmt.Errorf("invalid serviceId: %w", err)
@@ -163,9 +166,21 @@ func (h *HostedService) refresh() error {
 	default:
 	}
 	if len(h.route.gateway) == 0 {
-		peers := h.g.KnownPeers()
-		// Independent cryptographic random order per service; no global guard
-		// or fixed relay is shared by all services on a physical node.
+		// Candidate relays come only from verified relay information held
+		// locally; none of them is contacted before the circuit is built.
+		// The current guard is never used as the site's relay: it already
+		// knows this node's key, and as relay it would learn the site too.
+		guard := h.g.CurrentGuard()
+		var peers []DiscoveredPeer
+		for _, p := range h.g.KnownPeers() {
+			if bytes.Equal(p.NodeKey, guard) {
+				continue
+			}
+			if c, ok := h.g.knownRelay(p.NodeKey); ok && needSites(c) {
+				peers = append(peers, p)
+			}
+		}
+		// Independent cryptographic random order per service.
 		for i := len(peers) - 1; i > 0; i-- {
 			n, err := rand.Int(rand.Reader, big.NewInt(int64(i+1)))
 			if err != nil {
@@ -174,16 +189,14 @@ func (h *HostedService) refresh() error {
 			j := int(n.Int64())
 			peers[i], peers[j] = peers[j], peers[i]
 		}
+		var circuitErr error
 		for _, p := range peers {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			cap, err := h.g.queryCapabilityContext(ctx, p.NodeKey)
-			if err != nil || !slices.Contains(cap.Versions, CapabilitySites) {
-				continue
-			}
 			id, err := h.g.createSiteCircuitContext(ctx, p.NodeKey)
 			if err != nil {
+				circuitErr = err
 				continue
 			}
 			h.route.gateway = bytes.Clone(p.NodeKey)
@@ -193,13 +206,30 @@ func (h *HostedService) refresh() error {
 			break
 		}
 		if len(h.route.gateway) == 0 {
+			if len(h.g.trustedPeerKeys()) == 0 {
+				return ErrNoTrustedPeers
+			}
+			if len(peers) == 0 {
+				return errors.New("garlic: no usable relay known yet besides the trusted guard (waiting for gossip from trusted peers)")
+			}
+			if circuitErr != nil {
+				return fmt.Errorf("garlic: could not build a circuit to any site relay: %w", circuitErr)
+			}
 			return ErrDirectoryUnavailable
 		}
 	} else if err := h.route.ensureLocked(ctx); err != nil {
 		return err
 	}
 	now := uint64(time.Now().Unix())
-	d, err := SignServiceDescriptor(h.g.identity.SigningPublicKey, h.g.identity.SigningPrivateKey, h.serviceID, []IntroPoint{{NodeKey: h.route.gateway}}, now, now+180)
+	relayInfo := h.g.relayInfoRaw(h.route.gateway)
+	if relayInfo == nil {
+		h.g.CloseCircuit(h.route.circuit)
+		h.route.circuit = CircuitID{}
+		h.route.current.Store(nil)
+		h.route.gateway = nil
+		return ErrUnknownRelay
+	}
+	d, err := SignServiceDescriptor(h.g.identity.SigningPublicKey, h.g.identity.SigningPrivateKey, h.serviceID, []IntroPoint{{NodeKey: h.route.gateway, RelayInfo: relayInfo}}, now, now+180)
 	if err != nil {
 		return err
 	}
@@ -385,6 +415,10 @@ func (g *Garlic) DialService(ctx context.Context, domain string, port uint16) (n
 	for i, p := range d.IntroPoints {
 		if i >= 3 {
 			break
+		}
+		if _, err := g.learnRelayInfo(p.RelayInfo, p.NodeKey); err != nil {
+			last = err
+			continue
 		}
 		conn, err := g.dialSiteRelay(ctx, gid, d, p.NodeKey, port)
 		if err == nil {

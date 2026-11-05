@@ -147,18 +147,24 @@ func TestNetworkDirectoryValidatesRecordsAndCopiesOwnership(t *testing.T) {
 	d := &NetworkRendezvous{records: make(map[GID]*ServiceDescriptor)}
 	id := testDescriptorIdentity(t)
 	now := uint64(time.Now().Unix())
-	key := bytes.Repeat([]byte{1}, 32)
-	record, gid := testDescriptor(t, id, "site", []IntroPoint{{NodeKey: key}}, now, now+60)
+	relay := newTestRelay(t)
+	key := []byte(relay.nodePub)
+	unsigned, gidUnsigned := testDescriptor(t, id, "site", []IntroPoint{{NodeKey: bytes.Clone(key)}}, now, now+60)
+	if d.store(gidUnsigned, unsigned) {
+		t.Fatal("record without the relay's signed RelayInfo accepted")
+	}
+	record, gid := testDescriptor(t, id, "site", []IntroPoint{{NodeKey: key, RelayInfo: relay.info(t, nil, time.Hour)}}, now, now+60)
 	if !d.store(gid, record) {
 		t.Fatal("valid record refused")
 	}
-	record.IntroPoints[0].NodeKey[0] = 'X'
+	first := key[0]
+	record.IntroPoints[0].NodeKey[0] = first ^ 0xFF
 	got := d.local(gid)
-	if got.IntroPoints[0].NodeKey[0] != 1 {
+	if got.IntroPoints[0].NodeKey[0] != first {
 		t.Fatal("stored record aliases publisher memory")
 	}
-	got.IntroPoints[0].NodeKey[0] = 'Y'
-	if d.local(gid).IntroPoints[0].NodeKey[0] != 1 {
+	got.IntroPoints[0].NodeKey[0] = first ^ 0x0F
+	if d.local(gid).IntroPoints[0].NodeKey[0] != first {
 		t.Fatal("lookup exposes stored memory")
 	}
 	if d.store(gid, record) {

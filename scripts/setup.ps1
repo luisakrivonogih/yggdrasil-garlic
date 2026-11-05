@@ -5,10 +5,13 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 uninstall   (от администратора)
 #
 # Параметры: -Peers "tls://host:port,tls://host2:port"  -SiteAddr "127.0.0.1:8080"
+#            -Trusted "<ключ узла relay>,..."  -Mode client|relay
 param(
   [ValidateSet('build','install','uninstall')][string]$Command = 'build',
   [string]$Peers = '',
   [string]$SiteAddr = '',
+  [string]$Trusted = '',
+  [ValidateSet('','client','relay')][string]$Mode = '',
   [string]$InstallDir = "$env:ProgramFiles\Yggdrasil"
 )
 $ErrorActionPreference = 'Stop'
@@ -40,16 +43,30 @@ function Configure {
     Write-Host "==> создаю $ConfPath"
     & "$InstallDir\yggdrasil.exe" -genconf | Out-File -Encoding ascii $ConfPath
   } else { Write-Host "==> $ConfPath уже есть, ключи не трогаю" }
-  $t = Get-Content $ConfPath -Raw
+  Copy-Item $ConfPath "$ConfPath.bak" -Force
+  $t = (& "$InstallDir\yggdrasil.exe" -useconffile $ConfPath -normaliseconf) -join "`n"
   $t = [regex]::Replace($t, '(?ms)(^\s*Garlic:\s*\{.*?^\s*Enabled:) false', '$1 true')
   if ($Peers) {
     $list = ($Peers -split ',' | ForEach-Object { '"' + $_.Trim() + '"' }) -join ' '
     $t = [regex]::Replace($t, '(?m)^(\s*)Peers: \[\]', "`$1Peers: [ $list ]")
   }
+  if ($Mode) {
+    $t = [regex]::Replace($t, '(?m)^(\s*)Mode: .*$', "`$1Mode: $Mode")
+  }
+  if ($Trusted) {
+    $keys = $Trusted -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^[0-9a-fA-F]{64}$' }
+    if (-not $keys) { throw 'Trusted: нужны 64-символьные hex-ключи узлов (Public key из getSelf)' }
+    $list = ($keys | ForEach-Object { '"' + $_ + '"' }) -join ' '
+    $t = [regex]::Replace($t, '(?m)^(\s*)TrustedPeers: \[.*$', "`$1TrustedPeers: [ $list ]")
+  }
   if ($SiteAddr) {
     $t = [regex]::Replace($t, '(?m)^(\s*)Services: \[\]', "`$1Services: [ { ServiceID: `"`", LocalAddr: `"$SiteAddr`" } ]")
   }
-  Set-Content -Encoding ascii $ConfPath $t
+  $tmp = "$ConfPath.tmp"
+  Set-Content -Encoding ascii $tmp $t
+  & "$InstallDir\yggdrasil.exe" -useconffile $tmp -normaliseconf | Out-Null
+  if ($LASTEXITCODE -ne 0) { Remove-Item $tmp; throw "Новый конфиг не прошёл проверку, оставляю прежний $ConfPath" }
+  Move-Item $tmp $ConfPath -Force
 }
 
 function Install {

@@ -231,14 +231,9 @@ func TestLookupServiceRejectsBogusRendezvousResponse(t *testing.T) {
 	}
 }
 
-func TestProcessCapabilityRequestAdvertisesAutoCircuit(t *testing.T) {
-	g := newTestGarlic(t)
-	msg, err := UnmarshalCapabilityMessage(g.processCapabilityRequest())
-	if err != nil {
-		t.Fatalf("UnmarshalCapabilityMessage returned error: %v", err)
-	}
-	if !msg.SupportsAutoCircuit() {
-		t.Fatal("processCapabilityRequest() does not advertise CapabilityAutoCircuit")
+func TestRelaysAdvertiseAutoCircuit(t *testing.T) {
+	if !(&CapabilityMessage{Versions: supportedVersions()}).SupportsAutoCircuit() {
+		t.Fatal("relays do not advertise CapabilityAutoCircuit")
 	}
 }
 

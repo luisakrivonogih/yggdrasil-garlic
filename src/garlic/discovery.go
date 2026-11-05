@@ -18,38 +18,37 @@ package garlic
 import (
 	"encoding/binary"
 	"errors"
+	mrand "math/rand"
 	"sync"
 	"time"
 )
 
 const (
-	maxAnnouncePeers   = 32
-	maxAnnounceKeySize = 64
+	maxAnnouncePeers = 32
 )
 
 var (
 	ErrTooManyAnnouncePeers = errors.New("garlic: too many announced peers")
-	ErrAnnounceKeyTooLarge  = errors.New("garlic: announced key too large")
+	ErrAnnounceKeyTooLarge  = errors.New("garlic: announced relay info too large")
 	ErrAnnounceTruncated    = errors.New("garlic: announce message truncated")
 )
 
-// AnnouncePeer is one peer entry in an AnnounceMessage: enough to add it
-// as a discovery candidate without any further round trip (a capability
-// query still happens before it's ever used as a circuit hop - discovery
-// only seeds the candidate pool, it doesn't establish trust).
+// AnnouncePeer is one entry in an AnnounceMessage: a relay's signed
+// RelayInfo (see relayinfo.go). Every entry is verified against the
+// relay's own node key before it is used, so a gossiping peer can withhold
+// relays but cannot forge or alter their onion keys.
 type AnnouncePeer struct {
-	NodeKey         []byte
-	GarlicPublicKey []byte
+	RelayInfo []byte
 }
 
 // AnnounceMessage is the body of a msgTypeAnnounce message: a bounded
-// list of Garlic peers the sender already knows about.
+// list of relays the sender knows about.
 type AnnounceMessage struct {
 	Peers []AnnouncePeer
 }
 
 // Marshal encodes the message as count(4) followed by, per peer,
-// node_key_len(1)+bytes and garlic_key_len(1)+bytes.
+// info_len(2)+bytes.
 func (m *AnnounceMessage) Marshal() ([]byte, error) {
 	if len(m.Peers) > maxAnnouncePeers {
 		return nil, ErrTooManyAnnouncePeers
@@ -57,13 +56,11 @@ func (m *AnnounceMessage) Marshal() ([]byte, error) {
 	var buf []byte
 	buf = binary.BigEndian.AppendUint32(buf, uint32(len(m.Peers)))
 	for _, p := range m.Peers {
-		if len(p.NodeKey) > maxAnnounceKeySize || len(p.GarlicPublicKey) > maxAnnounceKeySize {
+		if len(p.RelayInfo) > maxRelayInfoSize {
 			return nil, ErrAnnounceKeyTooLarge
 		}
-		buf = append(buf, byte(len(p.NodeKey)))
-		buf = append(buf, p.NodeKey...)
-		buf = append(buf, byte(len(p.GarlicPublicKey)))
-		buf = append(buf, p.GarlicPublicKey...)
+		buf = binary.BigEndian.AppendUint16(buf, uint16(len(p.RelayInfo)))
+		buf = append(buf, p.RelayInfo...)
 	}
 	return buf, nil
 }
@@ -80,40 +77,23 @@ func UnmarshalAnnounceMessage(data []byte) (*AnnounceMessage, error) {
 		return nil, ErrTooManyAnnouncePeers
 	}
 	rest := data[4:]
-
 	peers := make([]AnnouncePeer, 0, count)
 	for range count {
-		nodeKey, next, err := chopAnnounceKey(rest)
-		if err != nil {
-			return nil, err
+		if len(rest) < 2 {
+			return nil, ErrAnnounceTruncated
 		}
-		rest = next
-		garlicKey, next, err := chopAnnounceKey(rest)
-		if err != nil {
-			return nil, err
+		n := int(binary.BigEndian.Uint16(rest[:2]))
+		rest = rest[2:]
+		if n > maxRelayInfoSize {
+			return nil, ErrAnnounceKeyTooLarge
 		}
-		rest = next
-		peers = append(peers, AnnouncePeer{NodeKey: nodeKey, GarlicPublicKey: garlicKey})
+		if n > len(rest) {
+			return nil, ErrAnnounceTruncated
+		}
+		peers = append(peers, AnnouncePeer{RelayInfo: append([]byte(nil), rest[:n]...)})
+		rest = rest[n:]
 	}
 	return &AnnounceMessage{Peers: peers}, nil
-}
-
-func chopAnnounceKey(data []byte) (key []byte, rest []byte, err error) {
-	if len(data) < 1 {
-		return nil, nil, ErrAnnounceTruncated
-	}
-	n := int(data[0])
-	data = data[1:]
-	if n > maxAnnounceKeySize {
-		return nil, nil, ErrAnnounceKeyTooLarge
-	}
-	if n > len(data) {
-		return nil, nil, ErrAnnounceTruncated
-	}
-	if n == 0 {
-		return nil, data, nil
-	}
-	return append([]byte(nil), data[:n]...), data[n:], nil
 }
 
 // DiscoveredPeer is one entry in a discoveryRegistry.
@@ -126,6 +106,10 @@ type DiscoveredPeer struct {
 	// only ever hearing about it secondhand via gossip (processAnnounce).
 	// Never downgraded by record() once true - see its doc comment.
 	SelfVerified bool
+	// ExpiresAt is when the relay deletes the onion key in RelayInfo.
+	ExpiresAt time.Time
+	// RelayInfo is the relay's signed self-description, re-shared in gossip.
+	RelayInfo []byte
 }
 
 // discoveryRegistry is the bounded set of Garlic peers this node has
@@ -174,6 +158,10 @@ func (r *discoveryRegistry) record(p DiscoveredPeer) {
 	if exists && existing.SelfVerified {
 		p.SelfVerified = true
 	}
+	// Never replace newer relay information with an older copy.
+	if exists && existing.ExpiresAt.After(p.ExpiresAt) {
+		p.ExpiresAt, p.RelayInfo, p.GarlicPublicKey = existing.ExpiresAt, existing.RelayInfo, existing.GarlicPublicKey
+	}
 	r.peers[key] = p
 }
 
@@ -191,22 +179,28 @@ func (r *discoveryRegistry) evictOldestLocked() {
 	}
 }
 
-// list returns every currently-tracked peer.
+// list returns every currently-tracked peer whose relay information has
+// not expired; expired entries are dropped.
 func (r *discoveryRegistry) list() []DiscoveredPeer {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	now := time.Now()
 	out := make([]DiscoveredPeer, 0, len(r.peers))
-	for _, p := range r.peers {
+	for k, p := range r.peers {
+		if !p.ExpiresAt.IsZero() && !now.Before(p.ExpiresAt) {
+			delete(r.peers, k)
+			continue
+		}
 		out = append(out, p)
 	}
 	return out
 }
 
-// sample returns up to n peers (all of them, if fewer than n are known).
-// Not cryptographically random - this selects gossip fan-out and
-// announce content, not anything security-critical.
+// sample returns up to n random peers (all of them, if fewer than n are
+// known).
 func (r *discoveryRegistry) sample(n int) []DiscoveredPeer {
 	all := r.list()
+	mrand.Shuffle(len(all), func(i, j int) { all[i], all[j] = all[j], all[i] })
 	if n >= len(all) {
 		return all
 	}

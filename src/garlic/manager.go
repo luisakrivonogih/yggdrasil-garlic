@@ -29,7 +29,6 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	mrand "math/rand"
 	"net"
 	"slices"
@@ -97,14 +96,29 @@ type Config struct {
 	// by the same operator or network than one several hops away.
 	MinHopCount int
 
-	// BootstrapPeers seeds the discovery registry at startup: this node
-	// queries each entry (hex-encoded node key) for its Garlic
-	// capability and, on success, immediately requests its known-peer
-	// gossip sample (RequestGossip) - the one manual step needed before
-	// AutoCreateCircuit has anything to work with, analogous to
-	// Yggdrasil's own NodeConfig.Peers. Best-effort: an unreachable
-	// bootstrap peer is simply skipped, not retried on a tight loop.
-	BootstrapPeers []string
+	// Hidden selects hidden (client) mode - see trust.go. A hidden node
+	// never answers capability or gossip requests, never relays, holds no
+	// onion key and is indistinguishable from a non-Garlic node to anyone
+	// except its trusted peers.
+	Hidden bool
+
+	// TrustedPeers are hex-encoded Yggdrasil node keys of Garlic relays
+	// this operator trusts. The first hop of every circuit is one of them
+	// (see guardFor), and in hidden mode they are the only nodes contacted
+	// directly. They also seed discovery at startup.
+	TrustedPeers []string
+
+	// TrustOutboundPeers additionally trusts every connected outbound,
+	// non-link-local mesh peer (the operator's own Peers list).
+	TrustOutboundPeers bool
+
+	// OnionKeyRotation is how often a relay replaces its onion key; the
+	// previous key is kept for a grace period and then wiped (onionkeys.go).
+	OnionKeyRotation time.Duration
+
+	// AllowServicesOnRelay permits hosting sites in relay mode, which links
+	// the site's availability to a publicly listed relay. Off by default.
+	AllowServicesOnRelay bool
 
 	// AutoPoolEnabled turns on the background circuit pool + rotation +
 	// (if CoverTrafficEnabled) cover traffic. A node can still relay/
@@ -163,6 +177,7 @@ func DefaultConfig() Config {
 		AutoRotationInterval: 15 * time.Minute,
 		CoverTrafficEnabled:  true,
 		CoverTrafficInterval: 75 * time.Second,
+		OnionKeyRotation:     time.Hour,
 	}
 }
 
@@ -251,8 +266,17 @@ type Garlic struct {
 	delivered     chan DeliveredMessage
 	autoDelivered chan AutoDeliveredMessage
 
+	onion       *onionKeyring // nil in hidden mode
+	selfInfoMu  sync.Mutex
+	selfInfo    *RelayInfo
+	selfInfoRaw []byte
+
+	trustMu sync.Mutex
+	trusted map[string][]byte // configured and runtime-added trusted node keys
+	guard   []byte            // current trusted first hop
+
 	mu              sync.Mutex
-	capabilityCache map[string]*CapabilityMessage
+	capabilityCache map[string]*cachedRelay
 	pending         map[string]chan *CapabilityMessage
 	capFlights      map[string]*capabilityFlight
 	originEphemeral map[CircuitID][]byte
@@ -280,13 +304,28 @@ func New(c *core.Core, identity *Identity, cfg Config, rendezvous Rendezvous) *G
 		discovery:       newDiscoveryRegistry(cfg.MaxDiscoveredPeers, c.PublicKey()),
 		delivered:       make(chan DeliveredMessage, 256),
 		autoDelivered:   make(chan AutoDeliveredMessage, 256),
-		capabilityCache: make(map[string]*CapabilityMessage),
+		capabilityCache: make(map[string]*cachedRelay),
+		trusted:         make(map[string][]byte),
 		pending:         make(map[string]chan *CapabilityMessage),
 		originEphemeral: make(map[CircuitID][]byte),
 		pools:           make(map[PoolID]*circuitPool),
 		autoPool:        make(map[CircuitID]time.Time),
 		stop:            make(chan struct{}),
 	}
+	for _, k := range cfg.TrustedPeers {
+		if key, err := hex.DecodeString(strings.TrimSpace(k)); err == nil && len(key) == ed25519.PublicKeySize {
+			g.trusted[string(key)] = key
+		}
+	}
+	if !cfg.Hidden {
+		rotation := max(cfg.OnionKeyRotation, 5*time.Minute)
+		grace := max(rotation, cfg.CircuitLifetime+cfg.PacketTTL+2*time.Minute)
+		g.onion = newOnionKeyring(rotation, grace, identity.PublicKey, identity.PrivateKey)
+	}
+	// The keyring holds its own copy of the initial onion key and wipes it
+	// on rotation; a second copy left in the identity would defeat that.
+	clear(identity.PrivateKey)
+	identity.PrivateKey = nil
 	g.scheduler = newJitterScheduler(func(data []byte, addr net.Addr) error {
 		_, err := c.WriteGarlic(data, addr)
 		return err
@@ -312,6 +351,9 @@ func (g *Garlic) Close() {
 	g.sites.close()
 	g.core.SetGarlicHandler(nil)
 	g.scheduler.Stop()
+	if g.onion != nil {
+		g.onion.wipe()
+	}
 }
 
 // sendCircuitData transmits a circuitData wire message to addr, applying
@@ -340,9 +382,22 @@ func (g *Garlic) cleanupLoop() {
 	defer t.Stop()
 	gossip := time.NewTicker(max(g.cfg.GossipInterval, time.Second))
 	defer gossip.Stop()
+	refresh := time.NewTicker(trustedRefreshInterval)
+	defer refresh.Stop()
 	for {
 		select {
+		case <-refresh.C:
+			// Pull fresh relay information (rotated onion keys) from the
+			// trusted peers, which already know this node uses Garlic.
+			for _, key := range g.trustedPeerKeys() {
+				_ = g.RequestGossip(key)
+			}
 		case <-t.C:
+			if g.onion != nil {
+				if changed, err := g.onion.rotate(time.Now()); err == nil && changed {
+					go g.gossipTick()
+				}
+			}
 			g.duplex.prune()
 			g.circuits.ExpireStale()
 			g.relayState.expireStale(2 * g.cfg.CircuitLifetime)
@@ -362,6 +417,9 @@ func (g *Garlic) cleanupLoop() {
 // discovery candidate), so discovery propagates without needing a
 // distributed directory.
 func (g *Garlic) gossipTick() {
+	if g.cfg.Hidden {
+		return // hidden nodes never push gossip; they only pull from trusted peers
+	}
 	g.mu.Lock()
 	targets := make([]string, 0, len(g.capabilityCache))
 	for key := range g.capabilityCache {
@@ -392,19 +450,13 @@ func (g *Garlic) gossipTick() {
 // enough to not depend on winning that race on the first try.
 const bootstrapMaxAttempts = 3
 
-// bootstrap resolves Config.BootstrapPeers into self-verified discovery
-// entries: QueryCapability (records the entry as SelfVerified via
-// handleCapabilityResponse) followed by RequestGossip, per peer,
-// best-effort - up to bootstrapMaxAttempts per peer, then skipped for
-// good (not retried again until the next process restart). Called once
-// from New in its own goroutine so New itself returns immediately,
-// matching this package's existing convention.
+// bootstrap contacts every trusted peer once at startup: QueryCapability
+// (verifies its signed RelayInfo) followed by RequestGossip, so the node
+// learns other relays' signed RelayInfo without contacting them. Up to
+// bootstrapMaxAttempts per peer; discover() and the trusted refresh in
+// cleanupLoop keep retrying afterwards. Runs in its own goroutine.
 func (g *Garlic) bootstrap() {
-	for _, hexKey := range g.cfg.BootstrapPeers {
-		key, err := hex.DecodeString(hexKey)
-		if err != nil {
-			continue
-		}
+	for _, key := range g.trustedPeerKeys() {
 		var verified bool
 		for attempt := 0; attempt < bootstrapMaxAttempts; attempt++ {
 			if _, err := g.QueryCapability(key); err == nil {
@@ -419,48 +471,6 @@ func (g *Garlic) bootstrap() {
 	}
 }
 
-// AddBootstrapPeer trusts the Garlic node with the given mesh public key
-// at runtime (the live equivalent of listing it in Config.BootstrapPeers):
-// it verifies the node's Garlic capability, records it as self-verified
-// and asks it for its known-peer gossip sample. The key is remembered for
-// this process only; persist it in Garlic.BootstrapPeers to keep it.
-func (g *Garlic) AddBootstrapPeer(key ed25519.PublicKey) error {
-	if len(key) != ed25519.PublicKeySize {
-		return fmt.Errorf("invalid key: want %d bytes, got %d", ed25519.PublicKeySize, len(key))
-	}
-	hexKey := hex.EncodeToString(key)
-	g.mu.Lock()
-	known := false
-	for _, k := range g.cfg.BootstrapPeers {
-		if strings.EqualFold(k, hexKey) {
-			known = true
-			break
-		}
-	}
-	if !known {
-		g.cfg.BootstrapPeers = append(g.cfg.BootstrapPeers, hexKey)
-	}
-	g.mu.Unlock()
-	var err error
-	for attempt := 0; attempt < bootstrapMaxAttempts; attempt++ {
-		if _, err = g.QueryCapability(key); err == nil {
-			break
-		}
-	}
-	if err != nil {
-		return fmt.Errorf("peer added but did not answer a Garlic capability query (is it reachable on the mesh and running Garlic?): %w", err)
-	}
-	_ = g.RequestGossip(key)
-	return nil
-}
-
-// BootstrapPeerKeys returns the currently trusted bootstrap keys (hex).
-func (g *Garlic) BootstrapPeerKeys() []string {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return append([]string(nil), g.cfg.BootstrapPeers...)
-}
-
 // GossipAnnounce sends to as a sample of this node's known Garlic peers
 // (Config.GossipSampleSize of them), so it can discover peers it hasn't
 // directly queried itself. Intended to be called with an already
@@ -468,10 +478,18 @@ func (g *Garlic) BootstrapPeerKeys() []string {
 // it otherwise - an unverified recipient simply can't parse the message
 // if it isn't running src/garlic, same as any other Garlic message type.
 func (g *Garlic) GossipAnnounce(to ed25519.PublicKey) error {
+	if g.cfg.Hidden {
+		return ErrHiddenMode
+	}
 	sample := g.discovery.sample(g.cfg.GossipSampleSize)
-	peers := make([]AnnouncePeer, len(sample))
-	for i, p := range sample {
-		peers[i] = AnnouncePeer{NodeKey: p.NodeKey, GarlicPublicKey: p.GarlicPublicKey}
+	peers := make([]AnnouncePeer, 0, len(sample)+1)
+	if raw, _, err := g.selfRelayInfo(); err == nil {
+		peers = append(peers, AnnouncePeer{RelayInfo: raw})
+	}
+	for _, p := range sample {
+		if len(p.RelayInfo) != 0 && len(peers) < maxAnnouncePeers {
+			peers = append(peers, AnnouncePeer{RelayInfo: p.RelayInfo})
+		}
 	}
 	body, err := (&AnnounceMessage{Peers: peers}).Marshal()
 	if err != nil {
@@ -508,6 +526,15 @@ func (g *Garlic) KnownPeers() []DiscoveredPeer {
 // tree parent (see SelectDiversePath). A peer with no resolved path yet
 // is skipped rather than scored with a meaningless zero.
 func (g *Garlic) candidatePool() []HopCandidate {
+	if g.core == nil {
+		// Unit-test fixture without a mesh: no topology data at all.
+		known := g.discovery.list()
+		pool := make([]HopCandidate, 0, len(known))
+		for _, p := range known {
+			pool = append(pool, HopCandidate{NodeKey: p.NodeKey, GarlicPublicKey: p.GarlicPublicKey, SelfVerified: p.SelfVerified})
+		}
+		return pool
+	}
 	tree := g.core.GetTree()
 	parentOf := make(map[string][]byte, len(tree))
 	for _, t := range tree {
@@ -519,7 +546,16 @@ func (g *Garlic) candidatePool() []HopCandidate {
 	for _, p := range known {
 		hops, ok := g.HopCount(p.NodeKey)
 		if !ok {
-			continue
+			// Relays learned from gossip are never contacted directly,
+			// so there is usually no cached path; estimate the distance
+			// from the spanning tree instead.
+			hops, ok = treeDistance(parentOf, g.core.PublicKey(), p.NodeKey)
+		}
+		if !ok {
+			// Topology not known yet (e.g. this node only just joined):
+			// keep the relay at the MinHopCount threshold, so relays with a
+			// known, larger distance are still preferred.
+			hops = g.cfg.MinHopCount
 		}
 		pool = append(pool, HopCandidate{
 			NodeKey:         p.NodeKey,
@@ -568,44 +604,11 @@ func (g *Garlic) SelectPath(n int) ([]HopCandidate, error) {
 // report, since it names the actual, actionable reason (upgrade that
 // peer) rather than just the symptom.
 func (g *Garlic) AutoCreateCircuit(n int) (CircuitID, error) {
-	pool := g.candidatePool()
-	excluded := map[string]bool{}
-	var lastVersionErr error
-
-	for {
-		hops, err := SelectPathWithGuardPolicy(excludeCandidates(pool, excluded), n, g.cfg.MinHopCount)
-		if err != nil {
-			if lastVersionErr != nil {
-				return CircuitID{}, lastVersionErr
-			}
-			return CircuitID{}, err
-		}
-
-		path := make([]CapabilityMessage, len(hops))
-		nodeKeys := make([][]byte, len(hops))
-		incompatible := false
-		for i, h := range hops {
-			capability, err := g.QueryCapability(h.NodeKey)
-			if err != nil {
-				return CircuitID{}, fmt.Errorf("hop %d: %w", i, err)
-			}
-			if !capability.SupportsGarlicV3() {
-				lastVersionErr = fmt.Errorf("hop %d: %w", i, ErrHopMissingGarlicV3Support)
-			} else if !capability.SupportsAutoCircuit() {
-				lastVersionErr = fmt.Errorf("hop %d: %w", i, ErrHopMissingAutoCircuitSupport)
-			} else {
-				path[i] = *capability
-				nodeKeys[i] = h.NodeKey
-				continue
-			}
-			excluded[string(h.NodeKey)] = true
-			incompatible = true
-			break
-		}
-		if !incompatible {
-			return g.CreateCircuit(path, nodeKeys)
-		}
+	path, nodeKeys, err := g.buildPath(context.Background(), n, nil, needAuto)
+	if err != nil {
+		return CircuitID{}, err
 	}
+	return g.CreateCircuit(path, nodeKeys)
 }
 
 // AutoPoolEntry is a point-in-time summary of one auto-pool circuit, for
@@ -973,7 +976,12 @@ func (g *Garlic) handleIncoming(from ed25519.PublicKey, data []byte) {
 	}
 	switch data[0] {
 	case msgTypeCapabilityRequest:
-		resp := append([]byte{msgTypeCapabilityResponse}, g.processCapabilityRequest()...)
+		// Hidden nodes stay silent, exactly like a node without Garlic.
+		info := g.processCapabilityRequest()
+		if info == nil {
+			return
+		}
+		resp := append([]byte{msgTypeCapabilityResponse}, info...)
 		_, _ = g.core.WriteGarlic(resp, iwt.Addr(from))
 		// Capability negotiation was previously one-directional: this node
 		// only ever recorded a peer as SelfVerified when IT sent the
@@ -1005,7 +1013,9 @@ func (g *Garlic) handleIncoming(from ed25519.PublicKey, data []byte) {
 			g.dispatchAction(action, from)
 		}
 	case msgTypeAnnounceRequest:
-		_ = g.GossipAnnounce(from)
+		if !g.cfg.Hidden {
+			_ = g.GossipAnnounce(from)
+		}
 	case msgTypeCircuitDataV3:
 		g.dispatchAction(g.processCircuitData(data[1:], msgTypeCircuitDataV3), from)
 	case msgTypeDuplexData:
@@ -1097,29 +1107,18 @@ func (g *Garlic) RelayCircuits() []RelayCircuitInfo {
 // processAnnounce, and it still has to pass a real, this-node-initiated
 // QueryCapability before it can be used as a hop.
 func (g *Garlic) handleCapabilityResponse(from ed25519.PublicKey, body []byte) {
-	msg, err := UnmarshalCapabilityMessage(body)
+	// The response must be a RelayInfo signed by the responding node itself.
+	info, err := parseVerifiedRelayInfo(body, from)
 	if err != nil {
 		return
 	}
 	key := hex.EncodeToString(from)
-
 	g.mu.Lock()
-	g.capabilityCache[key] = msg
 	ch := g.pending[key]
 	g.mu.Unlock()
-
-	// A successful, self-reported garlic-v2 response is exactly the
-	// verification discovery candidates need before they're worth
-	// remembering - see discovery.go's doc comment.
-	if msg.SupportsGarlicV2() && len(msg.PublicKey) > 0 {
-		g.discovery.record(DiscoveredPeer{
-			NodeKey:         append([]byte(nil), from...),
-			GarlicPublicKey: msg.PublicKey,
-			SelfVerified:    ch != nil,
-		})
-	}
-
+	g.rememberRelay(info, body, ch != nil)
 	if ch != nil {
+		msg := &CapabilityMessage{Versions: slices.Clone(info.Capability.Versions), PublicKey: bytes.Clone(info.Capability.PublicKey)}
 		select {
 		case ch <- msg:
 		default:
@@ -1142,15 +1141,15 @@ func (g *Garlic) queryCapabilityContext(ctx context.Context, peer ed25519.Public
 		return nil, ctx.Err()
 	}
 	if g.core != nil && bytes.Equal(peer, g.core.PublicKey()) {
-		return UnmarshalCapabilityMessage(g.processCapabilityRequest())
+		_, info, err := g.selfRelayInfo()
+		if err != nil {
+			return nil, err
+		}
+		return &info.Capability, nil
 	}
-	key := hex.EncodeToString(peer)
-	g.mu.Lock()
-	if cached, ok := g.capabilityCache[key]; ok {
-		g.mu.Unlock()
+	if cached, ok := g.knownRelay(peer); ok {
 		return cached, nil
 	}
-	g.mu.Unlock()
 	return g.requestCapabilityContext(ctx, peer)
 }
 

@@ -30,6 +30,9 @@ var (
 // Yggdrasil address.
 type IntroPoint struct {
 	NodeKey []byte
+	// RelayInfo is the introduction relay's signed RelayInfo, so a client
+	// can build a circuit to it without contacting it directly.
+	RelayInfo []byte `json:",omitempty"`
 }
 
 // Rendezvous maps Garlic Service IDs (GID) to their current signed

@@ -72,7 +72,7 @@ func (g *Garlic) SetupAdminHandlers(a *admin.AdminSocket) {
 			}, nil
 		})
 
-	_ = a.AddHandler("addGarlicPeer", "Trust a Garlic node by its mesh public key (hex) as a bootstrap peer, like addPeer but for Garlic; lasts until restart unless also put in Garlic.BootstrapPeers", []string{"key"},
+	_ = a.AddHandler("addGarlicPeer", "Trust a Garlic relay as a first hop, by its Yggdrasil node key (the \"Public key\" from getSelf). Verified before it is added; lasts until restart unless also listed in Garlic.TrustedPeers", []string{"key"},
 		func(in json.RawMessage) (interface{}, error) {
 			var req struct {
 				Key string `json:"key"`
@@ -80,27 +80,40 @@ func (g *Garlic) SetupAdminHandlers(a *admin.AdminSocket) {
 			if err := json.Unmarshal(in, &req); err != nil {
 				return nil, err
 			}
-			key, err := hex.DecodeString(strings.TrimSpace(req.Key))
+			key, err := g.AddTrustedPeer(req.Key)
 			if err != nil {
-				return nil, fmt.Errorf("invalid key: %w", err)
-			}
-			if err := g.AddBootstrapPeer(key); err != nil {
 				return nil, err
 			}
-			return map[string]interface{}{"added": hex.EncodeToString(key)}, nil
+			return map[string]interface{}{"added": hex.EncodeToString(key), "persist": "add it to Garlic.TrustedPeers to keep it after a restart"}, nil
 		})
 
-	_ = a.AddHandler("getGarlicPeers", "Show trusted Garlic bootstrap keys and all Garlic nodes this node currently knows", []string{},
+	_ = a.AddHandler("removeGarlicPeer", "Stop trusting a Garlic relay (until restart, if it is also in Garlic.TrustedPeers)", []string{"key"},
+		func(in json.RawMessage) (interface{}, error) {
+			var req struct {
+				Key string `json:"key"`
+			}
+			if err := json.Unmarshal(in, &req); err != nil {
+				return nil, err
+			}
+			return map[string]interface{}{"removed": g.RemoveTrustedPeer(req.Key)}, nil
+		})
+
+	_ = a.AddHandler("getGarlicPeers", "Show trusted Garlic peers, the current first hop (guard) and the relays this node knows", []string{},
 		func(in json.RawMessage) (interface{}, error) {
 			known := g.KnownPeers()
-			peers := make([]map[string]interface{}, len(known))
+			relays := make([]map[string]interface{}, len(known))
 			for i, p := range known {
-				peers[i] = map[string]interface{}{
-					"key": hex.EncodeToString(p.NodeKey), "selfVerified": p.SelfVerified,
-					"lastSeen": p.LastSeen.Format(time.RFC3339),
+				relays[i] = map[string]interface{}{
+					"key":             hex.EncodeToString(p.NodeKey),
+					"selfVerified":    p.SelfVerified,
+					"onionKeyExpires": p.ExpiresAt.UTC().Format(time.RFC3339),
 				}
 			}
-			return map[string]interface{}{"bootstrap": g.BootstrapPeerKeys(), "known": peers}, nil
+			out := map[string]interface{}{"mode": g.Mode(), "trusted": g.TrustedPeerKeys(), "relays": relays}
+			if guard := g.CurrentGuard(); guard != nil {
+				out["guard"] = hex.EncodeToString(guard)
+			}
+			return out, nil
 		})
 
 	_ = a.AddHandler("garlicQueryCapability", "Query whether a node supports Garlic and its public key", []string{"key"},
@@ -157,19 +170,9 @@ func (g *Garlic) SetupAdminHandlers(a *admin.AdminSocket) {
 				return nil, err
 			}
 			hops := splitCommaList(req.Hops)
-			path := make([]CapabilityMessage, len(hops))
-			nodeKeys := make([][]byte, len(hops))
-			for i, h := range hops {
-				key, err := hex.DecodeString(h)
-				if err != nil {
-					return nil, fmt.Errorf("invalid hop key: %w", err)
-				}
-				capability, err := g.QueryCapability(key)
-				if err != nil {
-					return nil, fmt.Errorf("hop %d: %w", i, err)
-				}
-				path[i] = *capability
-				nodeKeys[i] = key
+			path, nodeKeys, err := g.manualPath(hops)
+			if err != nil {
+				return nil, err
 			}
 			id, err := g.CreateCircuit(path, nodeKeys)
 			if err != nil {
@@ -305,7 +308,7 @@ func (g *Garlic) SetupAdminHandlers(a *admin.AdminSocket) {
 				if err != nil {
 					return nil, fmt.Errorf("invalid introduction point: %w", err)
 				}
-				points[i] = IntroPoint{NodeKey: key}
+				points[i] = IntroPoint{NodeKey: key, RelayInfo: g.relayInfoRaw(key)}
 			}
 			ttl, err := parseSecondsOrDefault(req.TTLSeconds, time.Hour)
 			if err != nil {
@@ -499,20 +502,9 @@ func (g *Garlic) SetupAdminHandlers(a *admin.AdminSocket) {
 			paths := make([][]CapabilityMessage, len(pathStrs))
 			nodeKeys := make([][][]byte, len(pathStrs))
 			for i, pathStr := range pathStrs {
-				hops := splitCommaList(pathStr)
-				path := make([]CapabilityMessage, len(hops))
-				keys := make([][]byte, len(hops))
-				for j, h := range hops {
-					key, err := hex.DecodeString(h)
-					if err != nil {
-						return nil, fmt.Errorf("path %d hop %d: invalid key: %w", i, j, err)
-					}
-					capability, err := g.QueryCapability(key)
-					if err != nil {
-						return nil, fmt.Errorf("path %d hop %d: %w", i, j, err)
-					}
-					path[j] = *capability
-					keys[j] = key
+				path, keys, err := g.manualPath(splitCommaList(pathStr))
+				if err != nil {
+					return nil, fmt.Errorf("path %d: %w", i, err)
 				}
 				paths[i] = path
 				nodeKeys[i] = keys
@@ -572,11 +564,64 @@ func (g *Garlic) SetupAdminHandlers(a *admin.AdminSocket) {
 // out from the handler closure so it can be tested without a real
 // admin.AdminSocket.
 func (g *Garlic) identityResponse() map[string]string {
-	return map[string]string{
-		"publicKey":        hex.EncodeToString(g.identity.PublicKey),
+	out := map[string]string{
+		"mode":             g.Mode(),
 		"signingPublicKey": hex.EncodeToString(g.identity.SigningPublicKey),
 		"domain":           ComputeGID(g.identity.SigningPublicKey, nil).Domain(),
+		"publicKey":        "",
+		"note":             "use nodeKey (or the Public key from getSelf) with addGarlicPeer",
 	}
+	if g.core != nil {
+		out["nodeKey"] = hex.EncodeToString(g.core.PublicKey())
+	}
+	if _, info, err := g.selfRelayInfo(); err == nil {
+		out["publicKey"] = hex.EncodeToString(info.Capability.PublicKey)
+		out["onionKeyExpires"] = time.Unix(int64(info.ExpiresAt), 0).UTC().Format(time.RFC3339)
+	}
+	return out
+}
+
+// manualPath resolves an operator-supplied hop list for the manual circuit
+// commands. The first hop must be trusted (it is contacted directly); the
+// other hops must already be known from verified relay information, so
+// they are never contacted directly either.
+func (g *Garlic) manualPath(hops []string) ([]CapabilityMessage, [][]byte, error) {
+	if len(hops) == 0 {
+		return nil, nil, ErrInvalidPath
+	}
+	path := make([]CapabilityMessage, len(hops))
+	keys := make([][]byte, len(hops))
+	for i, h := range hops {
+		key, err := hex.DecodeString(strings.TrimSpace(h))
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid hop key: %w", err)
+		}
+		var capability *CapabilityMessage
+		if i == 0 {
+			if !g.isTrusted(key) {
+				return nil, nil, ErrUntrustedFirstHop
+			}
+			if capability, err = g.QueryCapability(key); err != nil {
+				return nil, nil, fmt.Errorf("hop %d: %w", i, err)
+			}
+		} else {
+			var ok bool
+			if capability, ok = g.knownRelay(key); !ok {
+				return nil, nil, fmt.Errorf("hop %d: %w", i, ErrUnknownRelay)
+			}
+		}
+		path[i] = *capability
+		keys[i] = key
+	}
+	return path, keys, nil
+}
+
+// Mode returns "client" (hidden) or "relay".
+func (g *Garlic) Mode() string {
+	if g.cfg.Hidden {
+		return "client"
+	}
+	return "relay"
 }
 
 func poolIDToString(id PoolID) string {

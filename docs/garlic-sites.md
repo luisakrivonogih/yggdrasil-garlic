@@ -8,13 +8,18 @@ ordinary local HTTP server; Garlic forwards incoming streams to it.
 
 ## Start a website
 
-Generate a configuration with `yggdrasil -genconf`. Newly generated files
-include independent `Garlic.PrivateKey` and `Garlic.SigningPrivateKey`
-secrets. Keep these keys and the configuration to retain the domain.
-Older configurations need an independently generated 32-byte Ed25519 seed
-in `Garlic.SigningPrivateKey`; an optional persisted X25519 private key
-keeps the circuit identity stable too. Never replace either with the main
+> Operator guide (Russian), including hidden mode, trusted peers and key
+> rotation: [garlic-quickstart.md](garlic-quickstart.md).
+
+Generate a configuration with `yggdrasil -genconf`. It contains
+`Garlic.SigningPrivateKey`, the Ed25519 seed your domains are derived from;
+keep it to retain the domain. Onion (X25519) keys are ephemeral, rotate in
+memory and are never stored. Never replace the signing key with the main
 Yggdrasil private key.
+
+A site must be hosted by a hidden node (`Mode: "client"`, the default):
+relays refuse `Services` unless `AllowServicesOnRelay` is set, because a
+publicly listed relay's uptime would be linkable to the site.
 
 Run your HTTP server on, for example, `127.0.0.1:8080`. In the existing
 `Garlic` block, preserve its keys and other defaults and set:
@@ -29,10 +34,11 @@ Services: [
 ]
 ```
 
-Start Yggdrasil normally with that configuration and working mesh peers.
-Garlic discovers upgraded nodes through its direct mesh peers and their
-gossip. If your direct mesh peers do not run Garlic, add at least one known
-Garlic node key to `Garlic.BootstrapPeers`.
+Add at least one trusted relay (`Garlic.TrustedPeers`, the relay's
+Yggdrasil node key) that is reachable over the mesh. It is the first hop of
+every circuit and the only node the host contacts directly; all other
+relays are learned as signed `RelayInfo` through gossip from it and are
+never contacted before a circuit is built through them.
 
 The node logs the domain and then `Garlic website published` when its relay
 registration and distributed publication succeed. Inspect it with:

@@ -7,8 +7,11 @@
 #   sh scripts/setup.sh uninstall        остановить сервис и удалить бинарники (конфиг остаётся)
 #
 # Переменные окружения:
-#   PEERS="tls://host:port,tls://host2:port"   публичные пиры для обычной сети Yggdrasil
+#   PEERS="tls://host:port,tls://host2:port"   пиры обычной сети Yggdrasil (заменяют список в конфиге)
 #   SITE_ADDR=127.0.0.1:8080                   опубликовать локальный HTTP-сервер как .yggg сайт
+#   TRUSTED="<ключ узла>,<ключ узла>"          доверенные Garlic-relay (Public key из getSelf), первый хоп;
+#                                              заменяют список Garlic.TrustedPeers в конфиге
+#   MODE=client|relay                          client (по умолчанию, скрытый) или relay (публичный, для серверов)
 #   PREFIX=/usr/local                          куда ставить бинарники
 set -e
 
@@ -58,27 +61,68 @@ build() {
   echo "Готово: $ROOT/bin/yggdrasil, $ROOT/bin/yggdrasilctl"
 }
 
-# Правит конфиг: включает Garlic, при необходимости пиры и сайт.
+# set_list FILE "  Key:" 'ITEMS' - заменяет массив целиком (и однострочный
+# "Key: []", и многострочный, как его пишет -normaliseconf).
+set_list() {
+  awk -v key="$2" -v val="$3" '
+    BEGIN { match(key, /^ */); close_line = substr(key, 1, RLENGTH) "]" }
+    skip { if ($0 == close_line) skip = 0; next }
+    index($0, key " [") == 1 { print key " [ " val "]"; if ($0 !~ /\]$/) skip = 1; next }
+    { print }' "$1" > "$1.new" && mv "$1.new" "$1"
+}
+
+# Правит конфиг: включает Garlic, режим, доверенные пиры, обычные пиры и сайт.
+# Старый конфиг сначала нормализуется (переходит на новые поля), а итог
+# проверяется до перезапуска - при ошибке возвращается резервная копия.
 configure() {
+  YGG="$ROOT/bin/yggdrasil"
   if [ ! -f "$CONF" ]; then
     echo "==> создаю $CONF"
-    "$ROOT/bin/yggdrasil" -genconf > "$CONF"
+    "$YGG" -genconf > "$CONF"
     chmod 600 "$CONF"
   else
-    echo "==> $CONF уже есть, ключи не трогаю"
+    echo "==> $CONF уже есть, ключи сохраняю"
   fi
-  # Простые правки через sed работают, т.к. -genconf выдаёт по одному ключу на строку.
+  cp "$CONF" "$CONF.bak"
+  TMP="$CONF.tmp"
+  "$YGG" -useconffile "$CONF" -normaliseconf > "$TMP" || { echo "Текущий конфиг не читается, оставляю как есть" >&2; rm -f "$TMP"; return 1; }
   SED_I="sed -i"; [ "$OS" = Darwin ] && SED_I="sed -i ''"
-  eval "$SED_I -E '/^  Garlic:/,/^  }/ s/^(    Enabled:) false/\\1 true/' \"$CONF\""
+  eval "$SED_I -E '/^  Garlic:/,/^  }/ s/^(    Enabled:) false/\\1 true/' \"$TMP\""
+  if [ -n "$MODE" ]; then
+    case "$MODE" in client|relay) ;; *) echo "MODE должен быть client или relay" >&2; rm -f "$TMP"; return 1 ;; esac
+    eval "$SED_I -E 's/^    Mode: .*/    Mode: $MODE/' \"$TMP\""
+  fi
+  if [ -n "$TRUSTED" ]; then
+    LIST=$(echo "$TRUSTED" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | grep -E '^[0-9a-fA-F]{64}$' | sed 's/.*/"&"/' | tr '\n' ' ')
+    [ -n "$LIST" ] || { echo "TRUSTED: нужны 64-символьные hex-ключи узлов (Public key из getSelf)" >&2; rm -f "$TMP"; return 1; }
+    set_list "$TMP" "    TrustedPeers:" "$LIST"
+  fi
   if [ -n "$PEERS" ]; then
-    LIST=$(echo "$PEERS" | tr ',' '\n' | sed 's/^ *//;s/ *$//;s/.*/    "&"/' | tr '\n' ' ')
-    eval "$SED_I -E 's|^  Peers: \\[\\]|  Peers: [ $LIST ]|' \"$CONF\""
+    # -normaliseconf не проверяет адреса пиров, а неверный адрес роняет демон
+    # при старте - проверяем формат сами.
+    for p in $(echo "$PEERS" | tr ',' ' '); do
+      if ! printf '%s' "$p" | LC_ALL=C grep -Eq '^(tcp|tls|quic|ws|wss|socks|sockstls|unix)://[][A-Za-z0-9.:%_-]+:[0-9]{1,5}([/?][ -~]*)?$'; then
+        echo "Неверный адрес пира: $p (пример: tls://1.2.3.4:443)" >&2
+        rm -f "$TMP"
+        return 1
+      fi
+    done
+    LIST=$(echo "$PEERS" | tr ',' '\n' | sed 's/^ *//;s/ *$//;s/.*/"&"/' | tr '\n' ' ')
+    set_list "$TMP" "  Peers:" "$LIST"
   fi
   if [ -n "$SITE_ADDR" ]; then
-    eval "$SED_I -E 's|^    Services: \\[\\]|    Services: [ { ServiceID: \"\", LocalAddr: \"$SITE_ADDR\" } ]|' \"$CONF\""
+    eval "$SED_I -E 's|^    Services: \\[\\]|    Services: [ { ServiceID: \"\", LocalAddr: \"$SITE_ADDR\" } ]|' \"$TMP\""
   fi
-  if ! "$ROOT/bin/yggdrasil" -useconffile "$CONF" -normaliseconf 2>/dev/null | sed -n '/^  Garlic:/,/^  }/p' | grep -q '^    Enabled: true'; then
-    echo "ВНИМАНИЕ: не удалось автоматически включить Garlic — поставь Garlic.Enabled: true в $CONF вручную." >&2
+  if ! "$YGG" -useconffile "$TMP" -normaliseconf > /dev/null 2>&1; then
+    echo "Новый конфиг не прошёл проверку (неверный адрес пира?) - оставляю прежний $CONF" >&2
+    "$YGG" -useconffile "$TMP" -normaliseconf 2>&1 | tail -3 >&2
+    rm -f "$TMP"
+    return 1
+  fi
+  mv "$TMP" "$CONF"
+  chmod 600 "$CONF"
+  if ! "$YGG" -useconffile "$CONF" -normaliseconf -json | tr -d ' \n' | grep -q '"TrustedPeers":\["'; then
+    echo "ВНИМАНИЕ: Garlic.TrustedPeers пуст - цепочки строиться не будут. Добавьте: TRUSTED=<ключ узла relay> или yggdrasilctl addGarlicPeer key=..." >&2
   fi
 }
 
@@ -88,7 +132,7 @@ install_all() {
   build
   install -d "$PREFIX/bin"
   install -m 755 bin/yggdrasil bin/yggdrasilctl "$PREFIX/bin/"
-  configure
+  configure || exit 1
   case "$OS" in
     Darwin)
       sed "s|/usr/local/bin/yggdrasil -useconffile /etc/yggdrasil.conf|$PREFIX/bin/yggdrasil -useconffile $CONF|" \

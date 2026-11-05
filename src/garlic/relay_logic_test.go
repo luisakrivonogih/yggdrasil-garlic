@@ -87,12 +87,14 @@ func newTestGarlic(t *testing.T) *Garlic {
 	return &Garlic{
 		identity:        id,
 		cfg:             cfg,
+		onion:           newOnionKeyring(time.Hour, time.Hour, id.PublicKey, id.PrivateKey),
+		trusted:         make(map[string][]byte),
 		circuits:        NewCircuitManager(CircuitManagerConfig{MaxCircuits: cfg.MaxCircuits, MaxCircuitsPerPeer: cfg.MaxCircuitsPerPeer}),
 		relayState:      newRelayCircuitState(1024),
 		delivered:       make(chan DeliveredMessage, 256),
 		autoDelivered:   make(chan AutoDeliveredMessage, 256),
 		discovery:       newDiscoveryRegistry(1024, nil),
-		capabilityCache: make(map[string]*CapabilityMessage),
+		capabilityCache: make(map[string]*cachedRelay),
 		pending:         make(map[string]chan *CapabilityMessage),
 		originEphemeral: make(map[CircuitID][]byte),
 		pools:           make(map[PoolID]*circuitPool),
@@ -148,7 +150,7 @@ func TestProcessCircuitDataIntermediateHopForwards(t *testing.T) {
 	// correctly reconstructed the next envelope, not just that it didn't
 	// crash).
 	final := destID
-	finalGarlic := &Garlic{identity: final, relayState: newRelayCircuitState(1024)}
+	finalGarlic := &Garlic{identity: final, onion: testOnion(final), relayState: newRelayCircuitState(1024)}
 	finalAction := finalGarlic.processCircuitData(action.forwardMsg[1:], msgTypeCircuitData) // strip the msgTypeCircuitData prefix, as handleIncoming would
 	if finalAction.kind != actionDeliver {
 		t.Fatalf("final hop action.kind = %v, want actionDeliver", finalAction.kind)
@@ -550,8 +552,8 @@ func TestProcessCircuitDataHopLocalForwardsNextLegMetadata(t *testing.T) {
 func TestProcessAnnounceRecordsPeers(t *testing.T) {
 	g := newTestGarlic(t)
 	msg := &AnnounceMessage{Peers: []AnnouncePeer{
-		{NodeKey: []byte("node-a"), GarlicPublicKey: []byte("garlic-a")},
-		{NodeKey: []byte("node-b"), GarlicPublicKey: []byte("garlic-b")},
+		{RelayInfo: newTestRelay(t).info(t, nil, time.Hour)},
+		{RelayInfo: newTestRelay(t).info(t, nil, time.Hour)},
 	}}
 	body, err := msg.Marshal()
 	if err != nil {
@@ -576,7 +578,7 @@ func TestProcessAnnounceIgnoresMalformedInput(t *testing.T) {
 
 func TestProcessAnnounceSkipsEmptyKeyEntries(t *testing.T) {
 	g := newTestGarlic(t)
-	msg := &AnnounceMessage{Peers: []AnnouncePeer{{NodeKey: nil, GarlicPublicKey: []byte("g")}}}
+	msg := &AnnounceMessage{Peers: []AnnouncePeer{{RelayInfo: nil}}}
 	body, err := msg.Marshal()
 	if err != nil {
 		t.Fatalf("Marshal returned error: %v", err)
@@ -589,18 +591,40 @@ func TestProcessAnnounceSkipsEmptyKeyEntries(t *testing.T) {
 	}
 }
 
-func TestProcessCapabilityRequestAdvertisesGarlicV2(t *testing.T) {
+// Gossip cannot forge or alter a relay's onion key: an entry whose
+// signature does not verify against its own node key is ignored.
+func TestProcessAnnounceRejectsTamperedRelayInfo(t *testing.T) {
 	g := newTestGarlic(t)
-	resp := g.processCapabilityRequest()
-	msg, err := UnmarshalCapabilityMessage(resp)
+	raw := newTestRelay(t).info(t, nil, time.Hour)
+	raw[len(raw)-70] ^= 0xFF // flip a byte inside the onion key
+	body, err := (&AnnounceMessage{Peers: []AnnouncePeer{{RelayInfo: raw}}}).Marshal()
 	if err != nil {
-		t.Fatalf("UnmarshalCapabilityMessage returned error: %v", err)
+		t.Fatal(err)
 	}
-	if !msg.SupportsGarlicV2() {
-		t.Error("response does not advertise garlic-v2")
+	g.processAnnounce(body)
+	if n := len(g.discovery.list()); n != 0 {
+		t.Fatalf("tampered relay info was accepted (%d peers)", n)
 	}
-	if !bytes.Equal(msg.PublicKey, g.identity.PublicKey) {
-		t.Errorf("response PublicKey = %x, want %x", msg.PublicKey, g.identity.PublicKey)
+}
+
+func TestProcessAnnounceRejectsExpiredRelayInfo(t *testing.T) {
+	g := newTestGarlic(t)
+	body, err := (&AnnounceMessage{Peers: []AnnouncePeer{{RelayInfo: newTestRelay(t).info(t, nil, -time.Minute)}}}).Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.processAnnounce(body)
+	if n := len(g.discovery.list()); n != 0 {
+		t.Fatalf("expired relay info was accepted (%d peers)", n)
+	}
+}
+
+func TestProcessCapabilityRequestSilentInHiddenMode(t *testing.T) {
+	g := newTestGarlic(t)
+	g.cfg.Hidden = true
+	g.onion = nil
+	if resp := g.processCapabilityRequest(); resp != nil {
+		t.Fatalf("hidden node answered a capability request: %x", resp)
 	}
 }
 
@@ -608,16 +632,9 @@ func TestProcessCapabilityRequestAdvertisesGarlicV2(t *testing.T) {
 // msgTypeCapabilityResponse body - i.e. the best-case input
 // handleCapabilityResponse can be handed, so a test asserting it is *not*
 // recorded as self-verified is isolating solicitation, nothing else.
-func capabilityResponseBody(t *testing.T, garlicPub []byte) []byte {
+func capabilityResponseBody(t *testing.T, relay *testRelay) []byte {
 	t.Helper()
-	body, err := (&CapabilityMessage{
-		Versions:  []string{CapabilityGarlicV2, CapabilityAutoCircuit},
-		PublicKey: garlicPub,
-	}).Marshal()
-	if err != nil {
-		t.Fatalf("Marshal returned error: %v", err)
-	}
-	return body
+	return relay.info(t, nil, time.Hour)
 }
 
 func selfVerifiedFor(g *Garlic, nodeKey []byte) (found, selfVerified bool) {
@@ -631,14 +648,14 @@ func selfVerifiedFor(g *Garlic, nodeKey []byte) (found, selfVerified bool) {
 
 func TestHandleCapabilityResponseSolicitedIsSelfVerified(t *testing.T) {
 	g := newTestGarlic(t)
-	peerNode := bytes.Repeat([]byte{0xAB}, ed25519.PublicKeySize)
-	peerGarlic := bytes.Repeat([]byte{0xCD}, 32)
+	relay := newTestRelay(t)
+	peerNode := []byte(relay.nodePub)
 
 	// Stand in for requestCapability having just sent a request to this
 	// exact key and still waiting on it.
 	g.pending[hex.EncodeToString(peerNode)] = make(chan *CapabilityMessage, 1)
 
-	g.handleCapabilityResponse(peerNode, capabilityResponseBody(t, peerGarlic))
+	g.handleCapabilityResponse(peerNode, capabilityResponseBody(t, relay))
 
 	found, selfVerified := selfVerifiedFor(g, peerNode)
 	if !found {
@@ -658,14 +675,27 @@ func TestHandleCapabilityResponseSolicitedIsSelfVerified(t *testing.T) {
 // SelfVerified), and SelectPathWithGuardPolicy's guarantee would be void.
 func TestHandleCapabilityResponseUnsolicitedIsNotSelfVerified(t *testing.T) {
 	g := newTestGarlic(t)
-	peerNode := bytes.Repeat([]byte{0xAB}, ed25519.PublicKeySize)
-	peerGarlic := bytes.Repeat([]byte{0xCD}, 32)
+	relay := newTestRelay(t)
+	peerNode := []byte(relay.nodePub)
 
 	// Deliberately no g.pending entry: this node never asked.
-	g.handleCapabilityResponse(peerNode, capabilityResponseBody(t, peerGarlic))
+	g.handleCapabilityResponse(peerNode, capabilityResponseBody(t, relay))
 
 	if _, selfVerified := selfVerifiedFor(g, peerNode); selfVerified {
 		t.Fatal("SelfVerified = true for an unsolicited capability response; one unrequested packet must never grant first-hop-guard eligibility")
+	}
+}
+
+// A capability response must be signed by the node that sent it: a relay
+// cannot answer with somebody else's RelayInfo.
+func TestHandleCapabilityResponseRejectsForeignRelayInfo(t *testing.T) {
+	g := newTestGarlic(t)
+	sender := bytes.Repeat([]byte{0xAB}, ed25519.PublicKeySize)
+	other := newTestRelay(t)
+	g.pending[hex.EncodeToString(sender)] = make(chan *CapabilityMessage, 1)
+	g.handleCapabilityResponse(sender, capabilityResponseBody(t, other))
+	if len(g.discovery.list()) != 0 {
+		t.Fatal("accepted a RelayInfo that belongs to a different node than the responder")
 	}
 }
 
@@ -675,14 +705,14 @@ func TestHandleCapabilityResponseUnsolicitedIsNotSelfVerified(t *testing.T) {
 // unsolicited one - and must be treated the same way.
 func TestHandleCapabilityResponseAfterTimeoutIsNotSelfVerified(t *testing.T) {
 	g := newTestGarlic(t)
-	peerNode := bytes.Repeat([]byte{0xAB}, ed25519.PublicKeySize)
-	peerGarlic := bytes.Repeat([]byte{0xCD}, 32)
+	relay := newTestRelay(t)
+	peerNode := []byte(relay.nodePub)
 	key := hex.EncodeToString(peerNode)
 
 	g.pending[key] = make(chan *CapabilityMessage, 1)
 	delete(g.pending, key) // requestCapability's timeout path
 
-	g.handleCapabilityResponse(peerNode, capabilityResponseBody(t, peerGarlic))
+	g.handleCapabilityResponse(peerNode, capabilityResponseBody(t, relay))
 
 	if _, selfVerified := selfVerifiedFor(g, peerNode); selfVerified {
 		t.Fatal("SelfVerified = true for a response that arrived after this node's request had already timed out, want false")

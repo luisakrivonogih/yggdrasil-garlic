@@ -66,8 +66,13 @@ type GarlicConfig struct {
 	Proxy                GarlicProxyConfig     `comment:"Local browser proxy for .domains.yggg sites. Uses Garlic circuits;\nnever performs public DNS resolution for these names."`
 	Services             []GarlicServiceConfig `comment:"Hidden websites hosted by this node. Empty means client/relay only.\nEach service forwards virtual port 80 to LocalAddr, and optionally\n443 to TLSLocalAddr, through an authenticated encrypted stream."`
 	Enabled              bool                  `comment:"Enables the experimental Garlic Routing Overlay. Default is false."`
-	PrivateKey           KeyBytes              `json:",omitempty" comment:"This node's long-term Garlic identity private key. Independent of\nyour main Yggdrasil PrivateKey above - compromise of one does not\nimplicate the other. If left unset while Enabled is true, a fresh\nkey is generated at startup and your Garlic identity will not be\nstable across restarts."`
-	SigningPrivateKey    KeyBytes              `json:",omitempty" comment:"This node's Garlic service-descriptor signing key (Ed25519 seed,\n32 bytes). Independent of both PrivateKey above and your main\nYggdrasil key. Used only when publishing a Garlic service - see\ndocs/garlic-protocol.md section 6. If left unset while Enabled is\ntrue, a fresh key is generated at startup."`
+	Mode                 string                `comment:"\"client\" (default, hidden): this node never answers Garlic queries,\nnever relays and is invisible as a Garlic node to everyone except its\nTrustedPeers. Use this on desktops and on nodes hosting sites.\n\"relay\": public Garlic relay for servers - advertises itself, relays\ncircuits and stores directory records. See docs/garlic-quickstart.md."`
+	TrustedPeers         []string              `comment:"Yggdrasil public keys (hex, the \"Public key\" from yggdrasilctl getSelf)\nof Garlic relays you trust. The first hop of every circuit is always\none of these, and in client mode they are the only nodes contacted\ndirectly. They must be reachable over the mesh (Peers). Required:\nwithout a trusted relay no circuits can be built."`
+	TrustOutboundPeers   bool                  `comment:"Also trust every connected outbound peer from your Peers list (not\nmulticast/LAN or inbound peers) as a first hop. Default false."`
+	OnionKeyRotation     string                `comment:"Relay mode: how often the onion key is replaced (Go duration). The\nprevious key is wiped after a grace period, so recorded traffic\ncannot be decrypted later even if this machine is compromised."`
+	AllowServicesOnRelay bool                  `comment:"Allow hosting Services in relay mode. Off by default because a\npublic relay's uptime would be linkable to the site's uptime."`
+	BootstrapPeers       []string              `json:",omitempty" comment:"Deprecated alias of TrustedPeers."`
+	SigningPrivateKey    KeyBytes              `json:",omitempty" comment:"This node's Garlic site signing key (Ed25519 seed, 32 bytes). Your\nhash.domains.yggg addresses are derived from it - keep it to keep\nyour domains. Independent of your main Yggdrasil key. Onion keys\nare separate, ephemeral and never stored."`
 	PathLength           int                   `comment:"Number of hops for circuits this node originates."`
 	CircuitLifetime      string                `comment:"Maximum lifetime of a circuit before it must be rebuilt (Go duration\nformat, e.g. \"10m\")."`
 	MaxCircuits          int                   `comment:"Maximum number of circuits this node will originate at once."`
@@ -77,7 +82,6 @@ type GarlicConfig struct {
 	Jitter               GarlicJitterConfig    `comment:"Random delay before actually transmitting a circuit packet (origin\nsend or relay forward), independently re-rolled per packet - the\ntiming half of the same traffic-correlation defense as Padding."`
 	MaxDiscoveredPeers   int                   `comment:"Maximum number of other Garlic nodes this node will remember, learned\neither directly (a successful capability query) or via gossip from\nanother already-verified Garlic peer. Never exposed to, or\ndiscoverable by, a non-Garlic node."`
 	MinHopCount          int                   `comment:"Minimum mesh hop distance for a candidate to be selected as a circuit\nhop by SelectPath - a node too close is more likely to be run by the\nsame operator or network as this one. Does not affect hops supplied\ndirectly to CreateCircuit."`
-	BootstrapPeers       []string              `comment:"Hex-encoded node keys of a few known Garlic-capable peers, queried at\nstartup so this node's candidate pool starts non-empty - analogous to\nthe top-level Peers setting, but for Garlic circuit-hop discovery\nrather than mesh transport. Empty by default."`
 	AutoPoolEnabled      bool                  `comment:"Maintains a small background pool of automatically-built circuits\n(no manual hop keys needed) for sendGarlic/recvGarlic-style use and\nthe dashboard. Default is false; a node can still relay/terminate for\nother nodes' auto-pool circuits with this off."`
 	AutoPoolSize         int                   `comment:"Number of circuits the auto-pool maintains."`
 	AutoRotationInterval string                `comment:"How often one auto-pool circuit (the oldest) is retired and rebuilt\n(Go duration format, e.g. \"15m\"). Never the whole pool at once."`
@@ -165,7 +169,9 @@ func GenerateConfig() *NodeConfig {
 		},
 		MaxDiscoveredPeers:   1024,
 		MinHopCount:          2,
-		BootstrapPeers:       []string{},
+		Mode:                 "client",
+		TrustedPeers:         []string{},
+		OnionKeyRotation:     "1h",
 		AutoPoolEnabled:      false,
 		AutoPoolSize:         3,
 		AutoRotationInterval: "15m",

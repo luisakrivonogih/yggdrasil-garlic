@@ -281,7 +281,9 @@ func TestCreateGarlicCircuitAutoHandlerDefaultsHopCountToPathLength(t *testing.T
 
 	gB := garlic.New(cB, idB, cfg, garlic.NewStaticRendezvous())
 	defer gB.Close()
-	gA := garlic.New(cA, idA, cfg, garlic.NewStaticRendezvous())
+	cfgA := cfg
+	cfgA.TrustedPeers = []string{hex.EncodeToString(cB.PublicKey())}
+	gA := garlic.New(cA, idA, cfgA, garlic.NewStaticRendezvous())
 	defer gA.Close()
 
 	waitForCapability(t, gA, cB.PublicKey(), 60*time.Second)
@@ -319,7 +321,7 @@ func TestGetGarlicAutoPoolHandlerListsPool(t *testing.T) {
 	cfgA.CapabilityTimeout = 2 * time.Second
 	cfgA.MinHopCount = 0
 	cfgA.PathLength = 1
-	cfgA.BootstrapPeers = []string{hex.EncodeToString(cB.PublicKey())}
+	cfgA.TrustedPeers = []string{hex.EncodeToString(cB.PublicKey())}
 	cfgA.AutoPoolEnabled = true
 	cfgA.AutoPoolSize = 1
 	cfgA.CoverTrafficEnabled = false

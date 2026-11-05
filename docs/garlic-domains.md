@@ -71,13 +71,11 @@ descriptors return errors. `lookupGarlicService gid=<base32-gid>` remains
 available. In Go, `Garlic.LookupDomain(domain)` uses the same verifying
 lookup as `Garlic.LookupService(gid)`.
 
-To retain domains across daemon restarts, configure and preserve both
-`Garlic.PrivateKey` (32-byte X25519 secret) and `Garlic.SigningPrivateKey`
-(independently generated 32-byte Ed25519 seed), as hex strings. The
-signing key determines domains; the X25519 key is used for circuit ECDH.
-New `yggdrasil -genconf` output includes both secrets. A configured signing
-key alone also keeps domains stable while generating an ephemeral X25519
-key. Without a signing key, startup generates an ephemeral one and logs a warning;
+To retain domains across daemon restarts, preserve
+`Garlic.SigningPrivateKey` (independently generated 32-byte Ed25519 seed,
+hex). It alone determines domains; `yggdrasil -genconf` generates it.
+Onion (X25519) keys are ephemeral, rotate and are never configured
+(`Garlic.PrivateKey` is obsolete and ignored). Without a signing key, startup generates an ephemeral one and logs a warning;
 an ephemeral signing key produces different domains on restart. Changing
 the service ID also changes its domain. Descriptor renewal or changing
 introduction points does not change it.

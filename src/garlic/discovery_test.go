@@ -9,8 +9,8 @@ import (
 
 func TestAnnounceMessageMarshalUnmarshalRoundTrip(t *testing.T) {
 	msg := &AnnounceMessage{Peers: []AnnouncePeer{
-		{NodeKey: []byte("node-key-a"), GarlicPublicKey: []byte("garlic-key-a")},
-		{NodeKey: []byte("node-key-b"), GarlicPublicKey: []byte("garlic-key-b")},
+		{RelayInfo: newTestRelay(t).info(t, nil, time.Hour)},
+		{RelayInfo: newTestRelay(t).info(t, nil, time.Hour)},
 	}}
 	data, err := msg.Marshal()
 	if err != nil {
@@ -24,11 +24,8 @@ func TestAnnounceMessageMarshalUnmarshalRoundTrip(t *testing.T) {
 		t.Fatalf("got %d peers, want %d", len(got.Peers), len(msg.Peers))
 	}
 	for i := range msg.Peers {
-		if !bytes.Equal(got.Peers[i].NodeKey, msg.Peers[i].NodeKey) {
-			t.Errorf("peer %d NodeKey = %q, want %q", i, got.Peers[i].NodeKey, msg.Peers[i].NodeKey)
-		}
-		if !bytes.Equal(got.Peers[i].GarlicPublicKey, msg.Peers[i].GarlicPublicKey) {
-			t.Errorf("peer %d GarlicPublicKey = %q, want %q", i, got.Peers[i].GarlicPublicKey, msg.Peers[i].GarlicPublicKey)
+		if !bytes.Equal(got.Peers[i].RelayInfo, msg.Peers[i].RelayInfo) {
+			t.Errorf("peer %d RelayInfo differs after round trip", i)
 		}
 	}
 }
@@ -56,7 +53,7 @@ func TestAnnounceMessageMarshalRejectsTooManyPeers(t *testing.T) {
 }
 
 func TestAnnounceMessageMarshalRejectsOversizedKey(t *testing.T) {
-	msg := &AnnounceMessage{Peers: []AnnouncePeer{{NodeKey: make([]byte, maxAnnounceKeySize+1), GarlicPublicKey: []byte("g")}}}
+	msg := &AnnounceMessage{Peers: []AnnouncePeer{{RelayInfo: make([]byte, maxRelayInfoSize+1)}}}
 	if _, err := msg.Marshal(); err == nil {
 		t.Fatal("expected error for oversized node key, got nil")
 	}
@@ -79,7 +76,7 @@ func TestUnmarshalAnnounceMessageRejectsCountExceedingMax(t *testing.T) {
 func TestUnmarshalAnnounceMessageRejectsLengthExceedingBuffer(t *testing.T) {
 	var data []byte
 	data = binary.BigEndian.AppendUint32(data, 1)
-	data = append(data, 200) // node_key_len claims 200 bytes that aren't there
+	data = binary.BigEndian.AppendUint16(data, 200) // info_len claims 200 bytes that aren't there
 	if _, err := UnmarshalAnnounceMessage(data); err == nil {
 		t.Fatal("expected error for key length exceeding buffer, got nil")
 	}
