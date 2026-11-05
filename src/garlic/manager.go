@@ -418,6 +418,48 @@ func (g *Garlic) bootstrap() {
 	}
 }
 
+// AddBootstrapPeer trusts the Garlic node with the given mesh public key
+// at runtime (the live equivalent of listing it in Config.BootstrapPeers):
+// it verifies the node's Garlic capability, records it as self-verified
+// and asks it for its known-peer gossip sample. The key is remembered for
+// this process only; persist it in Garlic.BootstrapPeers to keep it.
+func (g *Garlic) AddBootstrapPeer(key ed25519.PublicKey) error {
+	if len(key) != ed25519.PublicKeySize {
+		return fmt.Errorf("invalid key: want %d bytes, got %d", ed25519.PublicKeySize, len(key))
+	}
+	hexKey := hex.EncodeToString(key)
+	g.mu.Lock()
+	known := false
+	for _, k := range g.cfg.BootstrapPeers {
+		if strings.EqualFold(k, hexKey) {
+			known = true
+			break
+		}
+	}
+	if !known {
+		g.cfg.BootstrapPeers = append(g.cfg.BootstrapPeers, hexKey)
+	}
+	g.mu.Unlock()
+	var err error
+	for attempt := 0; attempt < bootstrapMaxAttempts; attempt++ {
+		if _, err = g.QueryCapability(key); err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("peer added but did not answer a Garlic capability query (is it reachable on the mesh and running Garlic?): %w", err)
+	}
+	_ = g.RequestGossip(key)
+	return nil
+}
+
+// BootstrapPeerKeys returns the currently trusted bootstrap keys (hex).
+func (g *Garlic) BootstrapPeerKeys() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]string(nil), g.cfg.BootstrapPeers...)
+}
+
 // GossipAnnounce sends to as a sample of this node's known Garlic peers
 // (Config.GossipSampleSize of them), so it can discover peers it hasn't
 // directly queried itself. Intended to be called with an already

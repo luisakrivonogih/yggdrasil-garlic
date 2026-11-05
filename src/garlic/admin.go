@@ -72,6 +72,37 @@ func (g *Garlic) SetupAdminHandlers(a *admin.AdminSocket) {
 			}, nil
 		})
 
+	_ = a.AddHandler("addGarlicPeer", "Trust a Garlic node by its mesh public key (hex) as a bootstrap peer, like addPeer but for Garlic; lasts until restart unless also put in Garlic.BootstrapPeers", []string{"key"},
+		func(in json.RawMessage) (interface{}, error) {
+			var req struct {
+				Key string `json:"key"`
+			}
+			if err := json.Unmarshal(in, &req); err != nil {
+				return nil, err
+			}
+			key, err := hex.DecodeString(strings.TrimSpace(req.Key))
+			if err != nil {
+				return nil, fmt.Errorf("invalid key: %w", err)
+			}
+			if err := g.AddBootstrapPeer(key); err != nil {
+				return nil, err
+			}
+			return map[string]interface{}{"added": hex.EncodeToString(key)}, nil
+		})
+
+	_ = a.AddHandler("getGarlicPeers", "Show trusted Garlic bootstrap keys and all Garlic nodes this node currently knows", []string{},
+		func(in json.RawMessage) (interface{}, error) {
+			known := g.KnownPeers()
+			peers := make([]map[string]interface{}, len(known))
+			for i, p := range known {
+				peers[i] = map[string]interface{}{
+					"key": hex.EncodeToString(p.NodeKey), "selfVerified": p.SelfVerified,
+					"lastSeen": p.LastSeen.Format(time.RFC3339),
+				}
+			}
+			return map[string]interface{}{"bootstrap": g.BootstrapPeerKeys(), "known": peers}, nil
+		})
+
 	_ = a.AddHandler("garlicQueryCapability", "Query whether a node supports Garlic and its public key", []string{"key"},
 		func(in json.RawMessage) (interface{}, error) {
 			var req struct {
