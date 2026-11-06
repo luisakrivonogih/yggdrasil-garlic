@@ -208,6 +208,16 @@ else
   mkdir -p "$WORKDIR"
   rm -rf "$SRC_DIR"
   git clone --branch "$REPO_BRANCH" "$REPO_URL" "$SRC_DIR"
+  # The script piped in by `curl ... | sh` can be minutes older than the
+  # clone (raw.githubusercontent.com caches it for 5 minutes), i.e. an old
+  # installer driving new sources. The fresh clone is authoritative: carry
+  # on with its own installer.
+  if [ -z "$YGG_INSTALLER_REEXEC" ] && [ -f "$SRC_DIR/install.sh" ]; then
+    log "Continuing with the installer from the fresh checkout"
+    YGG_INSTALLER_REEXEC=1 NO_UPDATE=1
+    export YGG_INSTALLER_REEXEC NO_UPDATE
+    exec sh "$SRC_DIR/install.sh"
+  fi
 fi
 cd "$SRC_DIR"
 
