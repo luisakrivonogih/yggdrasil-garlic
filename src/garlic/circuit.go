@@ -44,6 +44,8 @@ type Circuit struct {
 
 	mu          sync.Mutex
 	hops        []Hop
+	fs          []hopFS // per-hop forward-secrecy state (fs.go); nil if unused
+	fsDone      bool    // forward keys switched to per-circuit keys
 	closed      bool
 	packetsSent uint64
 	bytesSent   uint64

@@ -76,6 +76,9 @@ type circuitAction struct {
 	tagged        bool
 	replyKey      []byte
 	nextCircuitID CircuitID
+	// Per-circuit forward secrecy (fs.go), duplex circuits only.
+	fsForward, fsReply, fsPub []byte // made on a circuit's first packet
+	fsUsed                    bool   // decrypted with the per-circuit key
 }
 
 // processCircuitData decides what to do with the body of a
@@ -112,6 +115,18 @@ func (g *Garlic) processCircuitData(body []byte, msgType byte) circuitAction {
 		return circuitAction{kind: actionDrop}
 	}
 
+	// A duplex circuit that already switched to per-circuit keys (fs.go)
+	// is decrypted with those first; no onion-key operation is needed.
+	if env.Version == EnvelopeVersion2 && msgType == msgTypeDuplexData {
+		if forward, reply := g.duplex.fsKeys(circuitID); forward != nil {
+			if a, ok := g.processHopLocalKey(forward, env, msgType); ok && a.kind != actionDrop {
+				a.replyKey = reply
+				a.fsUsed = true
+				return a
+			}
+		}
+	}
+
 	// Try every onion key that is still valid (current and, during the
 	// grace period after a rotation, the previous one). A hidden node has
 	// none and therefore drops everything.
@@ -133,6 +148,10 @@ func (g *Garlic) processCircuitData(body []byte, msgType byte) circuitAction {
 			a, ok = g.processCircuitDataHopLocal(secret, env, msgType)
 			if ok && msgType == msgTypeDuplexData && a.kind != actionDrop {
 				a.replyKey, _ = deriveReplyKey(secret)
+				if !g.duplex.hasRoute(circuitID) {
+					// First packet of this hop: make its per-circuit keys.
+					a.fsForward, a.fsReply, a.fsPub, _ = relayFSKeys(secret, ephemeralPub)
+				}
 			}
 		default:
 			g.security.malformedPackets.Add(1)
@@ -206,11 +225,16 @@ func (g *Garlic) processCircuitDataLegacy(secret []byte, env *Envelope, msgType 
 // copying env's own (incoming-leg) values. See
 // docs/superpowers/specs/2026-08-24-garlic-hop-local-metadata-design.md.
 func (g *Garlic) processCircuitDataHopLocal(secret []byte, env *Envelope, msgType byte) (circuitAction, bool) {
-	circuitID := env.CircuitID
 	key, err := deriveLayerKeyHopLocal(secret)
 	if err != nil {
 		return circuitAction{kind: actionDrop}, false
 	}
+	return g.processHopLocalKey(key, env, msgType)
+}
+
+// processHopLocalKey decrypts and handles a hop-local layer with key.
+func (g *Garlic) processHopLocalKey(key []byte, env *Envelope, msgType byte) (circuitAction, bool) {
+	circuitID := env.CircuitID
 	layer, err := DecryptLayerHopLocal(key, env.PacketCounter, env.Body)
 	if err != nil {
 		return circuitAction{kind: actionDrop}, false

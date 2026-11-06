@@ -59,7 +59,7 @@ func needAuto(c *CapabilityMessage) bool {
 
 // supportedVersions lists the capabilities a relay advertises.
 func supportedVersions() []string {
-	return []string{CapabilityGarlicV2, CapabilityGarlicV3, CapabilityAutoCircuit, CapabilitySites}
+	return []string{CapabilityGarlicV2, CapabilityGarlicV3, CapabilityAutoCircuit, CapabilitySites, CapabilityDuplexFS}
 }
 
 // cachedRelay is a verified RelayInfo held locally.

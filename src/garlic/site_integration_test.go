@@ -199,6 +199,22 @@ func TestSiteBrowserAcrossDistributedMesh(t *testing.T) {
 			t.Fatalf("cookie not host-only: %v", cookie)
 		}
 	}
+	// Circuits switched to per-circuit keys after their first round trip
+	// (fs.go): on the client, the hosting node and the relays in between.
+	if o, _ := garlic.FSCountsForTest(client); o == 0 {
+		t.Fatal("no client circuit switched to per-circuit forward-secret keys")
+	}
+	if o, _ := garlic.FSCountsForTest(overlays[0]); o == 0 {
+		t.Fatal("no host circuit switched to per-circuit forward-secret keys")
+	}
+	relayed := 0
+	for i := 1; i < 4; i++ {
+		_, r := garlic.FSCountsForTest(overlays[i])
+		relayed += r
+	}
+	if relayed == 0 {
+		t.Fatal("no relay carries a circuit on per-circuit keys")
+	}
 	response, err = browser.Get("http://" + service2.Domain() + "/")
 	if err != nil {
 		t.Fatal(err)

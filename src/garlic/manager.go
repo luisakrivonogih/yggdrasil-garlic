@@ -1324,6 +1324,7 @@ func (g *Garlic) CreateCircuit(path []CapabilityMessage, nodeKeys [][]byte) (Cir
 	}
 
 	hops := make([]Hop, len(path))
+	fs := make([]hopFS, len(path))
 	for i := range path {
 		secret, err := ECDH(ephemeralPrivs[i], path[i].PublicKey)
 		if err != nil {
@@ -1353,12 +1354,18 @@ func (g *Garlic) CreateCircuit(path []CapabilityMessage, nodeKeys [][]byte) (Cir
 			LocalCircuitID:   localID,
 		}
 		hops[i].ReplyKey, _ = deriveReplyKey(secret)
+		if slices.Contains(path[i].Versions, CapabilityDuplexFS) {
+			fs[i] = hopFS{capable: true, secret: secret, priv: ephemeralPrivs[i]}
+		}
 	}
 
 	c, err := g.circuits.Add(hops, g.cfg.CircuitLifetime, g.cfg.MaxPacketsPerCircuit, g.cfg.MaxBytesPerCircuit)
 	if err != nil {
 		return CircuitID{}, err
 	}
+	c.mu.Lock()
+	c.fs = fs
+	c.mu.Unlock()
 
 	g.mu.Lock()
 	g.originEphemeral[c.ID] = ephemeralPubs[0]
@@ -1370,6 +1377,9 @@ func (g *Garlic) CreateCircuit(path []CapabilityMessage, nodeKeys [][]byte) (Cir
 func (g *Garlic) CloseCircuit(id CircuitID) {
 	if g.duplex != nil {
 		g.duplex.forget(id)
+	}
+	if c, ok := g.circuits.Get(id); ok {
+		c.fsWipe()
 	}
 	g.circuits.Close(id)
 	g.mu.Lock()

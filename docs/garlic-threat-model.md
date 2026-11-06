@@ -717,9 +717,21 @@ rotated every `OnionKeyRotation` (default 1h) and wiped after a grace
 period (default another hour, at least circuit lifetime plus packet TTL).
 Compromise of a relay after a key is wiped does not expose previously
 recorded traffic through that relay. Originators only use a key that
-outlives the circuit they build. This is rotation-granular forward secrecy,
-not Tor's per-circuit ntor; a telescoping handshake remains possible future
-work. End-to-end site traffic additionally uses TLS 1.3.
+outlives the circuit they build. End-to-end site traffic additionally uses
+TLS 1.3.
+
+**Per-circuit forward secrecy (duplex circuits, `garlic-fs-v1`).** On a
+circuit's first packet every FS-capable relay makes a one-time X25519 key
+pair y/Y, derives its keys from ECDH(x, onion) and ECDH(y, X), and wipes y
+at once. Y reaches the originator in the header of the relay's reply layer;
+the originator derives the same keys, wipes x and switches; from then on
+the relay refuses packets under the onion-key keys (no downgrade) and needs
+no per-packet ECDH. When the circuit ends both sides drop the keys, so its
+traffic after the first round trip cannot be decrypted later even with the
+relay's onion key. The first exchange of each circuit is still covered only
+by the rotation above (no extra round trip is spent on a handshake). Hops
+without the capability keep onion-key keys. Non-duplex circuits
+(`sendGarlic`) are unchanged.
 
 **Remaining limits.** A malicious trusted peer learns that you use Garlic and
 can bias which relays you learn about; choose trusted peers you operate or

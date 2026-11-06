@@ -48,6 +48,10 @@ const CapabilityAutoCircuit = "garlic-v2-auto"
 // distributed descriptor protocol. Legacy circuits keep their wire format.
 const CapabilitySites = "garlic-sites-v1"
 
+// CapabilityDuplexFS: the relay adds per-circuit forward secrecy to duplex
+// circuits (fs.go) and puts a header in every reply layer it adds.
+const CapabilityDuplexFS = "garlic-fs-v1"
+
 const (
 	maxCapabilityVersions   = 16
 	maxCapabilityVersionLen = 32
