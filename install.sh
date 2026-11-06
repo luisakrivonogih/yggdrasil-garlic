@@ -217,8 +217,16 @@ cd "$SRC_DIR"
 # version (GOTOOLCHAIN=auto, the default) if the local `go` is older. So
 # we only need *some* Go >=1.21 present - if there's none at all, fetch a
 # private bootstrap copy under $WORKDIR rather than touching any system Go.
+#
+# go_works GO: the toolchain runs and its standard library is complete. A
+# half-extracted copy (an earlier run interrupted mid-download, a full
+# disk) otherwise only fails at build time with "package unsafe is not in
+# std" - and used to be skipped as "already downloaded" on every rerun.
+go_works() { ( cd / && GOTOOLCHAIN=local GOFLAGS= "$1" list unsafe runtime net/http ) >/dev/null 2>&1; }
 NEED_BOOTSTRAP=1
-if command -v go >/dev/null 2>&1; then
+if command -v go >/dev/null 2>&1 && ! go_works go; then
+  log "System Go at $(command -v go) is broken (incomplete standard library) - using a private bootstrap Go instead"
+elif command -v go >/dev/null 2>&1; then
   GOVER=$(go env GOVERSION 2>/dev/null | sed 's/^go//')
   GOMAJOR=$(echo "$GOVER" | cut -d. -f1)
   GOMINOR=$(echo "$GOVER" | cut -d. -f2)
@@ -232,14 +240,20 @@ fi
 
 if [ "$NEED_BOOTSTRAP" = "1" ]; then
   GO_BOOTSTRAP_DIR="$WORKDIR/go-bootstrap"
-  if [ ! -x "$GO_BOOTSTRAP_DIR/go/bin/go" ]; then
-    log "No suitable Go toolchain found - downloading a bootstrap Go into $GO_BOOTSTRAP_DIR"
+  if ! go_works "$GO_BOOTSTRAP_DIR/go/bin/go"; then
+    if [ -e "$GO_BOOTSTRAP_DIR" ]; then
+      log "The bootstrap Go in $GO_BOOTSTRAP_DIR is incomplete or broken - downloading it again"
+    else
+      log "No suitable Go toolchain found - downloading a bootstrap Go into $GO_BOOTSTRAP_DIR"
+    fi
     GOVERSION=$(curl -fsSL "https://go.dev/VERSION?m=text" | head -n1)
     [ -n "$GOVERSION" ] || die "could not determine the latest Go version (network issue?)"
+    rm -rf "$GO_BOOTSTRAP_DIR"
     mkdir -p "$GO_BOOTSTRAP_DIR"
     curl -fsSL "https://go.dev/dl/${GOVERSION}.linux-${GOTARBALLARCH}.tar.gz" -o "$GO_BOOTSTRAP_DIR/go.tar.gz"
-    tar -C "$GO_BOOTSTRAP_DIR" -xzf "$GO_BOOTSTRAP_DIR/go.tar.gz"
+    tar -C "$GO_BOOTSTRAP_DIR" -xzf "$GO_BOOTSTRAP_DIR/go.tar.gz" || die "could not unpack Go into $GO_BOOTSTRAP_DIR (out of disk space? check: df -h $WORKDIR)"
     rm -f "$GO_BOOTSTRAP_DIR/go.tar.gz"
+    go_works "$GO_BOOTSTRAP_DIR/go/bin/go" || die "the downloaded Go in $GO_BOOTSTRAP_DIR does not work (out of disk space? check: df -h $WORKDIR)"
   fi
   PATH="$GO_BOOTSTRAP_DIR/go/bin:$PATH"
   export PATH
@@ -309,13 +323,23 @@ if [ $((MEM_MB + SWAP_MB)) -lt 2048 ]; then
   export GOFLAGS
 fi
 log "Building and packaging ($PKGKIND, $PKGARCH) - first run also fetches the go.mod-pinned Go toolchain, can take a few minutes"
-rm -f ./*.deb ./*.rpm 2>/dev/null || true
+rm -f ./*.deb ./*.rpm ./yggdrasil ./yggdrasilctl 2>/dev/null || true
+BUILD_FAILED="the build failed (see the errors above) - nothing was installed, the existing installation is untouched"
 case "$PKGKIND" in
-  deb) PKGARCH=$PKGARCH sh contrib/deb/generate.sh ;;
-  rpm) PKGARCH=$PKGARCH sh contrib/rpm/generate.sh ;;
+  deb) PKGARCH=$PKGARCH sh contrib/deb/generate.sh || die "$BUILD_FAILED" ;;
+  rpm) PKGARCH=$PKGARCH sh contrib/rpm/generate.sh || die "$BUILD_FAILED" ;;
 esac
 PKGFILE=$(ls -t ./*."$PKGKIND" 2>/dev/null | head -n1)
 [ -n "$PKGFILE" ] && [ -f "$PKGFILE" ] || die "package build did not produce a .$PKGKIND file"
+# Never install a package without the binaries in it: that replaces a
+# working node with a broken service ("yggdrasil: not found").
+case "$PKGKIND" in
+  deb) PKGLIST=$(dpkg-deb -c "$PKGFILE" 2>/dev/null | awk '{ print $NF }') ;;
+  rpm) PKGLIST=$(rpm -qlp "$PKGFILE" 2>/dev/null) ;;
+esac
+for f in usr/bin/yggdrasil usr/bin/yggdrasilctl; do
+  echo "$PKGLIST" | grep -q "$f\$" || die "$PKGFILE has no /$f - $BUILD_FAILED"
+done
 log "Built $PKGFILE"
 
 # ---- 8. Install ----
