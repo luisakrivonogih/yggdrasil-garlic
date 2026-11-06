@@ -44,6 +44,9 @@ func TestSiteBrowserAcrossDistributedMesh(t *testing.T) {
 	cfg.AutoPoolEnabled = false
 	cfg.CircuitLifetime = 12 * time.Second
 	cfg.CapabilityTimeout = 2 * time.Second
+	// Sites get version 2 domains: the directory only ever sees blinded,
+	// encrypted records (blind.go).
+	cfg.BlindedDomains = true
 	// Nodes 1-3 are public relays. Node 0 hosts the site in hidden mode and
 	// trusts relay 1 as its guard; it is never contacted by anyone else.
 	newNode := func(hidden bool, trusted ...[]byte) (*core.Core, *garlic.Garlic) {
@@ -151,6 +154,9 @@ func TestSiteBrowserAcrossDistributedMesh(t *testing.T) {
 	}
 	if service2.Domain() == service.Domain() {
 		t.Fatal("two sites of one node got the same domain")
+	}
+	if gid, _ := garlic.ParseDomain(service.Domain()); gid[0] != garlic.GIDVersion2 {
+		t.Fatal("site did not get a blinded (version 2) domain")
 	}
 	// This hidden client joins only after publication. Its directory starts
 	// empty, and it knows only one trusted relay, never the service

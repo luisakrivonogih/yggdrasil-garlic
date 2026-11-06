@@ -8,6 +8,7 @@ package garlic
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -28,6 +29,10 @@ type directoryMessage struct {
 	ID     CircuitID
 	GID    GID
 	Store  *ServiceDescriptor `json:",omitempty"`
+	// Blinded records (version 2 GIDs, see blind.go): GID is then the
+	// blinded index key, never the site's GID.
+	StoreBlinded  *BlindedRecord `json:",omitempty"`
+	RecordBlinded *BlindedRecord `json:",omitempty"`
 	Record *ServiceDescriptor `json:",omitempty"`
 	Peers  [][]byte           `json:",omitempty"`
 	Stored bool               `json:",omitempty"`
@@ -41,11 +46,12 @@ type NetworkRendezvous struct {
 	g       *Garlic
 	mu      sync.Mutex
 	records map[GID]*ServiceDescriptor
+	blinded map[GID]*BlindedRecord
 	pending map[CircuitID]directoryPending
 }
 
 func newNetworkRendezvous(g *Garlic) *NetworkRendezvous {
-	d := &NetworkRendezvous{g: g, records: make(map[GID]*ServiceDescriptor), pending: make(map[CircuitID]directoryPending)}
+	d := &NetworkRendezvous{g: g, records: make(map[GID]*ServiceDescriptor), blinded: make(map[GID]*BlindedRecord), pending: make(map[CircuitID]directoryPending)}
 	go d.discover()
 	return d
 }
@@ -77,7 +83,14 @@ func (d *NetworkRendezvous) discover() {
 				}
 				cap, err := d.g.QueryCapability(key)
 				if err != nil {
-					silent[string(key)] = time.Now().Add(5 * time.Minute)
+					// A trusted peer that did not answer yet (often: this
+					// node only just started and is not peered yet) is
+					// asked again soon; other peers are left alone longer.
+					backoff := 5 * time.Minute
+					if d.g.isTrusted(key) {
+						backoff = 10 * time.Second
+					}
+					silent[string(key)] = time.Now().Add(backoff)
 					continue
 				}
 				delete(silent, string(key))
@@ -94,6 +107,11 @@ func (d *NetworkRendezvous) discover() {
 
 func (d *NetworkRendezvous) pruneLocked() {
 	now := uint64(time.Now().Unix())
+	for key, r := range d.blinded {
+		if now > r.ExpiresAt+descriptorClockSkew {
+			delete(d.blinded, key)
+		}
+	}
 	for gid, r := range d.records {
 		if descriptorExpired(r, now) {
 			delete(d.records, gid)
@@ -156,6 +174,38 @@ func validateNetworkDescriptor(record *ServiceDescriptor, gid GID) error {
 	return nil
 }
 
+// storeBlinded keeps a blinded record if it is valid for key and newer
+// than the one held.
+func (d *NetworkRendezvous) storeBlinded(key GID, r *BlindedRecord) bool {
+	if validateBlindedRecord(r, key, time.Now()) != nil {
+		return false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.pruneLocked()
+	old := d.blinded[key]
+	if old != nil && old.PublishedAt > r.PublishedAt {
+		return false
+	}
+	if old == nil && len(d.records)+len(d.blinded) >= maxDirectoryRecords {
+		return false
+	}
+	c := *r
+	d.blinded[key] = &c
+	return true
+}
+
+func (d *NetworkRendezvous) localBlinded(key GID) *BlindedRecord {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.pruneLocked()
+	if r := d.blinded[key]; r != nil {
+		c := *r
+		return &c
+	}
+	return nil
+}
+
 func (d *NetworkRendezvous) local(gid GID) *ServiceDescriptor {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -209,14 +259,21 @@ func (d *NetworkRendezvous) handleRequest(circuit CircuitID, body []byte) {
 		return
 	}
 	var req directoryMessage
-	if json.Unmarshal(body, &req) != nil || req.GID[0] != GIDVersion1 {
+	if json.Unmarshal(body, &req) != nil || (req.GID[0] != GIDVersion1 && req.GID[0] != gidBlindedIndex) {
 		return
 	}
 	res := directoryMessage{ID: req.ID, GID: req.GID}
-	if req.Store != nil {
-		res.Stored = d.store(req.GID, req.Store)
+	if req.GID[0] == gidBlindedIndex {
+		if req.StoreBlinded != nil {
+			res.Stored = d.storeBlinded(req.GID, req.StoreBlinded)
+		}
+		res.RecordBlinded = d.localBlinded(req.GID)
+	} else {
+		if req.Store != nil {
+			res.Stored = d.store(req.GID, req.Store)
+		}
+		res.Record = d.local(req.GID)
 	}
-	res.Record = d.local(req.GID)
 	// Referrals carry each node's signed RelayInfo so the requester can
 	// build circuits to them without contacting them first.
 	for _, key := range closestDirectoryNodes(req.GID, d.seeds(), directoryWidth) {
@@ -248,7 +305,7 @@ func (d *NetworkRendezvous) handleResponse(circuit CircuitID, body []byte) {
 	}
 }
 
-func (d *NetworkRendezvous) rpc(ctx context.Context, peer []byte, gid GID, record *ServiceDescriptor) (directoryMessage, error) {
+func (d *NetworkRendezvous) rpc(ctx context.Context, peer []byte, gid GID, record *ServiceDescriptor, blinded *BlindedRecord) (directoryMessage, error) {
 	if ctx.Err() != nil {
 		return directoryMessage{}, ctx.Err()
 	}
@@ -271,7 +328,7 @@ func (d *NetworkRendezvous) rpc(ctx context.Context, peer []byte, gid GID, recor
 	d.pending[id] = directoryPending{cid, ch}
 	d.mu.Unlock()
 	defer func() { d.mu.Lock(); delete(d.pending, id); d.mu.Unlock() }()
-	body, err := json.Marshal(directoryMessage{ID: id, GID: gid, Store: record})
+	body, err := json.Marshal(directoryMessage{ID: id, GID: gid, Store: record, StoreBlinded: blinded})
 	if err != nil {
 		return directoryMessage{}, err
 	}
@@ -310,6 +367,7 @@ func (d *NetworkRendezvous) rpc(ctx context.Context, peer []byte, gid GID, recor
 type walkResult struct {
 	peers    [][]byte
 	record   *ServiceDescriptor
+	blinded  *BlindedRecord // for a blinded index key
 	known    int   // other directory nodes known or learned during the walk
 	asked    int   // how many of them were asked
 	answered int   // how many of them answered
@@ -348,6 +406,9 @@ func (d *NetworkRendezvous) walk(ctx context.Context, gid GID, untilFound bool) 
 		reachable[self] = d.g.core.PublicKey()
 	}
 	best := d.local(gid)
+	if gid[0] == gidBlindedIndex {
+		w.blinded = d.localBlinded(gid)
+	}
 	for queries := 0; queries < 24; {
 		var batch [][]byte
 		for _, peer := range d.g.failingLast(closestDirectoryNodes(gid, nodes, directoryWidth)) {
@@ -369,7 +430,7 @@ func (d *NetworkRendezvous) walk(ctx context.Context, gid GID, untilFound bool) 
 		}
 		results := make(chan result, len(batch))
 		for _, peer := range batch {
-			go func(peer []byte) { res, err := d.rpc(ctx, peer, gid, nil); results <- result{peer, res, err} }(peer)
+			go func(peer []byte) { res, err := d.rpc(ctx, peer, gid, nil, nil); results <- result{peer, res, err} }(peer)
 			queries++
 			w.asked++
 		}
@@ -394,8 +455,11 @@ func (d *NetworkRendezvous) walk(ctx context.Context, gid GID, untilFound bool) 
 			if record := r.res.Record; validateNetworkDescriptor(record, gid) == nil && (best == nil || record.PublishedAt > best.PublishedAt || (record.PublishedAt == best.PublishedAt && record.ExpiresAt > best.ExpiresAt)) {
 				best = record
 			}
+			if b := r.res.RecordBlinded; gid[0] == gidBlindedIndex && validateBlindedRecord(b, gid, time.Now()) == nil && (w.blinded == nil || b.PublishedAt > w.blinded.PublishedAt) {
+				w.blinded = b
+			}
 		}
-		if untilFound && best != nil {
+		if untilFound && (best != nil || w.blinded != nil) {
 			break
 		}
 	}
@@ -413,7 +477,37 @@ func (d *NetworkRendezvous) Publish(gid GID, record *ServiceDescriptor) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	w := d.walk(ctx, gid, false)
+	return d.publishAt(ctx, gid, record, nil)
+}
+
+// PublishBlinded publishes the descriptor of a version 2 GID as blinded
+// records (blind.go): for the current day and, near its end, the next.
+func (d *NetworkRendezvous) PublishBlinded(gid GID, record *ServiceDescriptor, key ed25519.PrivateKey) error {
+	if gid[0] != GIDVersion2 {
+		return d.Publish(gid, record)
+	}
+	if err := validateNetworkDescriptor(record, gid); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	var first error
+	for i, period := range blindPeriodsFor(time.Now()) {
+		r, err := sealBlindedRecord(record, key, period)
+		if err != nil {
+			return err
+		}
+		if err := d.publishAt(ctx, blindedIndexKey(r.Index), nil, r); err != nil && i == 0 {
+			first = err
+		}
+	}
+	return first
+}
+
+// publishAt stores record (or the blinded record) at the directory nodes
+// closest to key.
+func (d *NetworkRendezvous) publishAt(ctx context.Context, key GID, record *ServiceDescriptor, blinded *BlindedRecord) error {
+	w := d.walk(ctx, key, false)
 	stored, remote := 0, 0
 	var storeErr error
 	for _, peer := range w.peers {
@@ -422,7 +516,7 @@ func (d *NetworkRendezvous) Publish(gid GID, record *ServiceDescriptor) error {
 			// they would show up in its directory before anywhere else.
 			continue
 		}
-		res, err := d.rpc(ctx, peer, gid, record)
+		res, err := d.rpc(ctx, peer, key, record, blinded)
 		if err != nil {
 			storeErr = err
 		}
@@ -455,9 +549,38 @@ func (d *NetworkRendezvous) Lookup(gid GID) (*ServiceDescriptor, error) {
 func (d *NetworkRendezvous) LookupContext(ctx context.Context, gid GID) (*ServiceDescriptor, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	w := d.walk(ctx, gid, true)
-	if w.record != nil {
-		return cloneDescriptor(w.record), nil
+	var w walkResult
+	if gid[0] == GIDVersion2 {
+		// Ask for the blinded record of today, then yesterday and
+		// tomorrow (clock differences around midnight UTC).
+		var total walkResult
+		for _, period := range blindLookupPeriods(time.Now()) {
+			index, err := BlindPublicKey(gid[1:], period)
+			if err != nil {
+				return nil, err
+			}
+			w = d.walk(ctx, blindedIndexKey(index), true)
+			if w.blinded != nil {
+				if desc, err := openBlindedRecord(w.blinded, gid, time.Now()); err == nil {
+					return desc, nil
+				}
+			}
+			total.asked += w.asked
+			total.answered += w.answered
+			total.known = max(total.known, w.known)
+			if w.lastErr != nil {
+				total.lastErr = w.lastErr
+			}
+			if ctx.Err() != nil {
+				break
+			}
+		}
+		w = total
+	} else {
+		w = d.walk(ctx, gid, true)
+		if w.record != nil {
+			return cloneDescriptor(w.record), nil
+		}
 	}
 	if ctx.Err() != nil {
 		cause := "none answered"

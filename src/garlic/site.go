@@ -113,7 +113,7 @@ func (g *Garlic) StartService(cfg ServiceConfig) (*HostedService, error) {
 			}
 		}
 	}
-	gid := ComputeGID(key.Public().(ed25519.PublicKey), serviceID)
+	gid := g.siteGIDFor(key.Public().(ed25519.PublicKey), serviceID)
 	cert, err := siteCertificate(key, gid.Domain())
 	if err != nil {
 		return nil, err
@@ -256,7 +256,7 @@ func (h *HostedService) refresh() error {
 	for i, l := range live {
 		points[i] = l.point
 	}
-	d, err := SignServiceDescriptor(pub, h.key, h.serviceID, points, now, now+180)
+	d, err := SignServiceDescriptorFor(h.gid, pub, h.key, h.serviceID, points, now, now+180)
 	if err != nil {
 		return err
 	}
@@ -275,7 +275,7 @@ func (h *HostedService) refresh() error {
 	}
 	if len(registered) < len(points) {
 		// Publish only the relays that accepted the registration.
-		if d, err = SignServiceDescriptor(pub, h.key, h.serviceID, registered, now, now+180); err != nil {
+		if d, err = SignServiceDescriptorFor(h.gid, pub, h.key, h.serviceID, registered, now, now+180); err != nil {
 			return err
 		}
 	}
@@ -285,6 +285,9 @@ func (h *HostedService) refresh() error {
 	// Directory RPCs construct independent circuits, avoiding publication
 	// over the service's data circuits. The relays remain stable while
 	// their circuits rotate, so live QUIC streams retain their endpoints.
+	if directory, ok := h.g.rendezvous.(*NetworkRendezvous); ok {
+		return directory.PublishBlinded(h.gid, d, h.key)
+	}
 	return h.g.rendezvous.Publish(h.gid, d)
 }
 

@@ -25,7 +25,7 @@ func TestDomainEncoding(t *testing.T) {
 
 func TestParseDomainRejectsMalformedNames(t *testing.T) {
 	label := "ae" + strings.Repeat("a", 51)
-	unknown := GID{GIDVersion1 + 1}
+	unknown := GID{GIDVersion2 + 1}
 	for _, name := range []string{
 		"", ".domains.yggg", "domains.yggg", "example.yggg", label,
 		label + ".yggg", label + ".garlic.ygg", label + ".domains.yggg.evil",

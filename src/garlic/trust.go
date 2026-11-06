@@ -408,6 +408,10 @@ func (g *Garlic) guardCapability(ctx context.Context, key []byte, allowSuspect b
 		return nil, ErrCapabilityTimeout
 	case known:
 		return cached, nil
+	case suspect:
+		// Nothing known and the last request went unanswered: do not ask
+		// again on this path (a background check will).
+		return nil, ErrCapabilityTimeout
 	}
 	// First contact: nothing known about this peer yet, ask directly.
 	c, err := g.requestCapabilityContext(ctx, key)

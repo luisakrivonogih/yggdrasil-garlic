@@ -132,6 +132,7 @@ func main() {
 			panic(genErr)
 		}
 		cfg.Garlic.SigningPrivateKey = identity.SigningPrivateKey.Seed()
+		cfg.Garlic.BlindedDomains = true
 		cfg.AdminListen = ""
 		var bs []byte
 		if *confjson {
@@ -366,6 +367,7 @@ func main() {
 			gcfg.MinHopCount = cfg.Garlic.MinHopCount
 			gcfg.Hidden = hidden
 			gcfg.TrustedPeers = trustedPeers
+			gcfg.BlindedDomains = cfg.Garlic.BlindedDomains
 			gcfg.TrustOutboundPeers = cfg.Garlic.TrustOutboundPeers
 			if guard, err := hex.DecodeString(strings.TrimSpace(cfg.Garlic.Guard)); err == nil && len(guard) == ed25519.PublicKeySize {
 				gcfg.Guard = guard
@@ -403,7 +405,9 @@ func main() {
 					logger.Println("Garlic relay: no Garlic.TrustedPeers - relaying works; this node will not originate circuits of its own")
 				}
 			}
-			logger.Printf("Your Garlic default domain is %s", garlic.ComputeGID(identity.SigningPublicKey, nil).Domain())
+			if gid, err := n.garlic.SiteGID("", nil); err == nil {
+				logger.Printf("Your Garlic default domain is %s", gid.Domain())
+			}
 			if n.admin != nil {
 				n.garlic.SetupAdminHandlers(n.admin)
 			}

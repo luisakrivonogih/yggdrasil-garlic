@@ -66,7 +66,7 @@ func TestParseGIDRejectsWrongLength(t *testing.T) {
 
 func TestParseGIDRejectsUnsupportedVersion(t *testing.T) {
 	g := ComputeGID([]byte("pub"), []byte("svc"))
-	g[0] = GIDVersion1 + 1 // craft an otherwise-well-formed GID with an unknown version
+	g[0] = GIDVersion2 + 1 // craft an otherwise-well-formed GID with an unknown version
 	if _, err := ParseGID(g.String()); err == nil {
 		t.Fatal("expected error for unsupported GID version, got nil")
 	}

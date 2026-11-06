@@ -8,14 +8,29 @@ package garlic
 // is a wholly separate namespace).
 
 import (
+	"crypto/ed25519"
 	"encoding/base32"
 	"errors"
 
+	"filippo.io/edwards25519"
 	"golang.org/x/crypto/blake2b"
 )
 
-// GIDVersion1 is the only GID wire version defined so far.
+// GIDVersion1: a BLAKE2b-256 digest of the site key and service ID.
 const GIDVersion1 uint8 = 1
+
+// GIDVersion2: the site's Ed25519 public key itself, so that clients can
+// derive the per-day blinded keys its descriptors are stored under in the
+// directory (see blind.go). Directory nodes never see such a GID.
+const GIDVersion2 uint8 = 2
+
+// ComputeGIDv2 returns the version 2 GID of a site key.
+func ComputeGIDv2(publicKey ed25519.PublicKey) GID {
+	var g GID
+	g[0] = GIDVersion2
+	copy(g[1:], publicKey)
+	return g
+}
 
 const gidDomainSeparator = "yggdrasil-garlic-v1-gid"
 
@@ -64,7 +79,13 @@ func ParseGID(s string) (GID, error) {
 	}
 	var g GID
 	copy(g[:], b)
-	if g[0] != GIDVersion1 {
+	switch g[0] {
+	case GIDVersion1:
+	case GIDVersion2:
+		if _, err := new(edwards25519.Point).SetBytes(g[1:]); err != nil {
+			return GID{}, ErrInvalidGIDLength
+		}
+	default:
 		return GID{}, ErrUnsupportedGIDVersion
 	}
 	return g, nil

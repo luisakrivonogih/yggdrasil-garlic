@@ -185,7 +185,7 @@ func (r *siteRouter) handle(e siteEvent) {
 			return
 		}
 		d := reg.Descriptor
-		gid := ComputeGID(d.ServicePublicKey, d.ServiceID)
+		gid := DescriptorGID(d)
 		if VerifyServiceDescriptor(d, gid, uint64(time.Now().Unix())) != nil {
 			return
 		}
@@ -286,7 +286,7 @@ func (r *siteRouter) register(ctx context.Context, id CircuitID, gateway []byte,
 	c.mu.Lock()
 	terminal := c.hops[len(c.hops)-1].LocalCircuitID
 	c.mu.Unlock()
-	gid := ComputeGID(d.ServicePublicKey, d.ServiceID)
+	gid := DescriptorGID(d)
 	reg := siteRegistration{d, ed25519.Sign(key, registrationBytes(gid, gateway, terminal))}
 	body, err := json.Marshal(reg)
 	if err != nil {

@@ -31,6 +31,22 @@ const ServiceDescriptorVersion1 uint8 = 1
 // RelayInfo, so clients never contact the relay before building a circuit.
 const ServiceDescriptorVersion2 uint8 = 2
 
+// ServiceDescriptorVersion3 is version 2 for a site with a version 2 GID
+// (its domain is its key; the directory stores it blinded, see blind.go).
+const ServiceDescriptorVersion3 uint8 = 3
+
+func supportedDescriptorVersion(v uint8) bool {
+	return v == ServiceDescriptorVersion1 || v == ServiceDescriptorVersion2 || v == ServiceDescriptorVersion3
+}
+
+// DescriptorGID is the GID a descriptor is for.
+func DescriptorGID(d *ServiceDescriptor) GID {
+	if d.Version == ServiceDescriptorVersion3 {
+		return ComputeGIDv2(d.ServicePublicKey)
+	}
+	return ComputeGID(d.ServicePublicKey, d.ServiceID)
+}
+
 var (
 	ErrServiceIDTooLarge            = errors.New("garlic: service ID exceeds maximum size")
 	ErrUnsupportedDescriptorVersion = errors.New("garlic: unsupported service descriptor version")
@@ -110,7 +126,7 @@ func unmarshalServiceDescriptorFields(data []byte) (*ServiceDescriptor, error) {
 		return nil, ErrDescriptorTruncated
 	}
 	d := &ServiceDescriptor{Version: data[0]}
-	if d.Version != ServiceDescriptorVersion1 && d.Version != ServiceDescriptorVersion2 {
+	if !supportedDescriptorVersion(d.Version) {
 		return nil, ErrUnsupportedDescriptorVersion
 	}
 	rest := data[1:]
@@ -186,11 +202,25 @@ func unmarshalServiceDescriptorFields(data []byte) (*ServiceDescriptor, error) {
 // serviceID/introPoints, valid from publishedAt to expiresAt (span
 // capped at MaxDescriptorLifetime), using signingPrivateKey.
 func SignServiceDescriptor(signingPublicKey ed25519.PublicKey, signingPrivateKey ed25519.PrivateKey, serviceID []byte, introPoints []IntroPoint, publishedAt, expiresAt uint64) (*ServiceDescriptor, error) {
+	return signServiceDescriptor(ServiceDescriptorVersion2, signingPublicKey, signingPrivateKey, serviceID, introPoints, publishedAt, expiresAt)
+}
+
+// SignServiceDescriptorFor signs a descriptor for gid: version 3 for a
+// version 2 GID, version 2 otherwise.
+func SignServiceDescriptorFor(gid GID, signingPublicKey ed25519.PublicKey, signingPrivateKey ed25519.PrivateKey, serviceID []byte, introPoints []IntroPoint, publishedAt, expiresAt uint64) (*ServiceDescriptor, error) {
+	version := ServiceDescriptorVersion2
+	if gid[0] == GIDVersion2 {
+		version = ServiceDescriptorVersion3
+	}
+	return signServiceDescriptor(version, signingPublicKey, signingPrivateKey, serviceID, introPoints, publishedAt, expiresAt)
+}
+
+func signServiceDescriptor(version uint8, signingPublicKey ed25519.PublicKey, signingPrivateKey ed25519.PrivateKey, serviceID []byte, introPoints []IntroPoint, publishedAt, expiresAt uint64) (*ServiceDescriptor, error) {
 	if expiresAt < publishedAt || expiresAt-publishedAt > MaxDescriptorLifetime {
 		return nil, ErrDescriptorLifetimeTooLong
 	}
 	d := &ServiceDescriptor{
-		Version:          ServiceDescriptorVersion2,
+		Version:          version,
 		ServicePublicKey: signingPublicKey,
 		ServiceID:        serviceID,
 		IntroPoints:      introPoints,
@@ -221,10 +251,10 @@ func SignServiceDescriptor(signingPublicKey ed25519.PublicKey, signingPrivateKey
 // stops a self-signed, unreasonably-long-lived descriptor from being
 // trusted.
 func VerifyServiceDescriptor(d *ServiceDescriptor, gid GID, now uint64) error {
-	if d.Version != ServiceDescriptorVersion1 && d.Version != ServiceDescriptorVersion2 {
+	if !supportedDescriptorVersion(d.Version) {
 		return ErrUnsupportedDescriptorVersion
 	}
-	if ComputeGID(d.ServicePublicKey, d.ServiceID) != gid {
+	if DescriptorGID(d) != gid {
 		return ErrDescriptorGIDMismatch
 	}
 	toVerify, err := d.signedBytes()

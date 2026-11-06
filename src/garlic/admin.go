@@ -580,7 +580,7 @@ func (g *Garlic) identityResponse() map[string]string {
 	out := map[string]string{
 		"mode":             g.Mode(),
 		"signingPublicKey": hex.EncodeToString(g.identity.SigningPublicKey),
-		"domain":           ComputeGID(g.identity.SigningPublicKey, nil).Domain(),
+		"domain":           g.siteGIDFor(g.identity.SigningPublicKey, nil).Domain(),
 		"publicKey":        "",
 		"note":             "use nodeKey (or the Public key from getSelf) with addGarlicPeer",
 	}

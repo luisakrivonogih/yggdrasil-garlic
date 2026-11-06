@@ -1149,6 +1149,23 @@ func TestIntegrationAutoPoolRotatesOneCircuitAtATime(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
+	// Start counting right after a rotation, so the window below holds
+	// exactly one rotation tick whatever the pool's start-up timing was
+	// (an initial fill can fail while the mesh is still forming, which
+	// shifts when the second circuit is added relative to the ticks).
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		now := gA.AutoPoolStatus()
+		if len(now) == 2 && (now[0].ID != before[0].ID && now[0].ID != before[1].ID || now[1].ID != before[0].ID && now[1].ID != before[1].ID) {
+			before = now
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no rotation observed; status: %+v", now)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
 	time.Sleep(1500 * time.Millisecond) // past one rotation tick, comfortably short of a second one
 
 	after := gA.AutoPoolStatus()

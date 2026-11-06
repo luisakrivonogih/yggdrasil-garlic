@@ -384,7 +384,7 @@ func (g *Garlic) dialSiteConn(ctx context.Context, gid GID, d *ServiceDescriptor
 			}
 			cert := state.PeerCertificates[0]
 			key, ok := cert.PublicKey.(ed25519.PublicKey)
-			if !ok || !bytes.Equal(key, d.ServicePublicKey) || ComputeGID(key, d.ServiceID) != gid {
+			if !ok || !bytes.Equal(key, d.ServicePublicKey) || DescriptorGID(d) != gid {
 				return ErrDescriptorGIDMismatch
 			}
 			roots := x509.NewCertPool()

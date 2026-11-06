@@ -59,5 +59,13 @@ func (g *Garlic) SiteGID(name string, serviceID []byte) (GID, error) {
 	if err != nil {
 		return GID{}, err
 	}
-	return ComputeGID(key.Public().(ed25519.PublicKey), serviceID), nil
+	return g.siteGIDFor(key.Public().(ed25519.PublicKey), serviceID), nil
+}
+
+// siteGIDFor is the GID of a site key in this node's domain format.
+func (g *Garlic) siteGIDFor(pub ed25519.PublicKey, serviceID []byte) GID {
+	if g.cfg.BlindedDomains {
+		return ComputeGIDv2(pub)
+	}
+	return ComputeGID(pub, serviceID)
 }

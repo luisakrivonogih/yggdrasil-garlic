@@ -679,6 +679,18 @@ circuits. What remains is availability correlation: sites of one host are
 up and down together. Anyone holding `SigningPrivateKey` can link all of
 the host's sites.
 
+**Blinded directory records.** With `BlindedDomains` a site's domain is
+its Ed25519 key A (GID version 2). For each UTC day p the site and anyone
+who knows the domain derive h_p = H(A, p) and the blinded key
+A_p = h_p·A; the site signs with a_p = h_p·a. Records are stored under
+A_p, signed with a_p, and their content (the ordinary signed descriptor)
+is encrypted with a key derived from A and p. Directory nodes see only
+A_p and ciphertext: they cannot enumerate domains, read intro points,
+link a site across days, or forge records. Clients ask for today's record,
+then yesterday's and tomorrow's (clock differences around midnight UTC);
+hosts publish today's and, in the last two hours of a day, tomorrow's.
+The site relays still see the GID they serve.
+
 **Guard liveness.** A trusted guard is confirmed by a direct capability
 answer at least once a minute; one that stops answering (offline, or
 switched to hidden mode) is skipped in favour of another trusted peer even

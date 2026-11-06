@@ -174,12 +174,14 @@ func setupDomainCommands(a *admin.AdminSocket, p *configPersister, services []co
 			}
 			if err := p.update(func(cfg *config.NodeConfig) bool {
 				cfg.Garlic.SigningPrivateKey = seed
+				// New domains use the blinded format (blind.go).
+				cfg.Garlic.BlindedDomains = true
 				return true
 			}); err != nil {
 				return nil, fmt.Errorf("could not save the new key to %s, nothing changed: %w", p.path, err)
 			}
 			key := ed25519.NewKeyFromSeed(seed)
-			domains := map[string]string{"(default)": garlic.ComputeGID(key.Public().(ed25519.PublicKey), nil).Domain()}
+			domains := map[string]string{"(default)": garlic.ComputeGIDv2(key.Public().(ed25519.PublicKey)).Domain()}
 			for _, s := range services {
 				serviceID, err := hex.DecodeString(s.ServiceID)
 				if err != nil {
@@ -196,7 +198,7 @@ func setupDomainCommands(a *admin.AdminSocket, p *configPersister, services []co
 				if s.ServiceID != "" {
 					label += " serviceId=" + s.ServiceID
 				}
-				domains[label] = garlic.ComputeGID(siteKey.Public().(ed25519.PublicKey), serviceID).Domain()
+				domains[label] = garlic.ComputeGIDv2(siteKey.Public().(ed25519.PublicKey)).Domain()
 			}
 			return map[string]interface{}{
 				"saved":      true,

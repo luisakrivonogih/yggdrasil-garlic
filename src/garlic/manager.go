@@ -112,6 +112,11 @@ type Config struct {
 	// non-link-local mesh peer (the operator's own Peers list).
 	TrustOutboundPeers bool
 
+	// BlindedDomains gives this node's sites version 2 GIDs (the domain is
+	// the site key) whose directory records are blinded and encrypted
+	// (blind.go). Switching it changes every domain.
+	BlindedDomains bool
+
 	// Guard is the first hop to start with: the guard used before the last
 	// restart (persisted by the daemon), if it is still trusted. Keeping
 	// the same guard means fewer nodes ever see this node's circuits.
