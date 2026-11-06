@@ -237,11 +237,23 @@ func VerifyServiceDescriptor(d *ServiceDescriptor, gid GID, now uint64) error {
 	if d.ExpiresAt < d.PublishedAt || d.ExpiresAt-d.PublishedAt > MaxDescriptorLifetime {
 		return ErrDescriptorLifetimeTooLong
 	}
-	if d.PublishedAt > now {
+	// Host, directory relays and clients each check against their own
+	// clock. Without a tolerance, a host whose clock ran a second ahead of a
+	// relay's had every record refused, and a client whose clock lagged
+	// dropped every fresh record, as if the site was not published at all.
+	if d.PublishedAt > now+descriptorClockSkew {
 		return ErrDescriptorNotYetValid
 	}
-	if now > d.ExpiresAt {
+	if descriptorExpired(d, now) {
 		return ErrDescriptorExpired
 	}
 	return nil
+}
+
+// descriptorClockSkew is the clock difference between nodes tolerated
+// when checking a descriptor's validity window (as for RelayInfo).
+const descriptorClockSkew = relayInfoClockSkew
+
+func descriptorExpired(d *ServiceDescriptor, now uint64) bool {
+	return now > d.ExpiresAt+descriptorClockSkew
 }

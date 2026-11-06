@@ -105,7 +105,7 @@ func TestLookupDomainVerifiesDirectoryRecords(t *testing.T) {
 	}{
 		{"forged", attacker, now, now + 3600, false, ErrDescriptorGIDMismatch},
 		{"tampered", id, now, now + 3600, true, ErrInvalidDescriptorSignature},
-		{"expired", id, now - 100, now - 1, false, ErrDescriptorExpired},
+		{"expired", id, now - descriptorClockSkew - 100, now - descriptorClockSkew - 1, false, ErrDescriptorExpired},
 		{"future", id, now + 3600, now + 7200, false, ErrDescriptorNotYetValid},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -96,7 +96,7 @@ func TestVerifyServiceDescriptorRejectsExpired(t *testing.T) {
 	}
 	gid := ComputeGID(id.SigningPublicKey, serviceID)
 
-	if err := VerifyServiceDescriptor(d, gid, 2001); err == nil {
+	if err := VerifyServiceDescriptor(d, gid, 2000+descriptorClockSkew+1); err == nil {
 		t.Fatal("expected error verifying an expired descriptor, got nil")
 	}
 }
@@ -212,5 +212,29 @@ func TestUnmarshalServiceDescriptorFieldsRoundTripsSignedBytes(t *testing.T) {
 	}
 	if len(got.IntroPoints) != 1 || !bytes.Equal(got.IntroPoints[0].NodeKey, []byte("intro")) {
 		t.Fatalf("round-tripped IntroPoints = %+v", got.IntroPoints)
+	}
+}
+
+// Nodes compare descriptor times against their own clocks; a few seconds
+// (or minutes) of difference between host, directory and client must not
+// make a fresh descriptor invalid.
+func TestVerifyServiceDescriptorToleratesClockSkew(t *testing.T) {
+	id := testDescriptorIdentity(t)
+	serviceID := []byte("svc")
+	d, err := SignServiceDescriptor(id.SigningPublicKey, id.SigningPrivateKey, serviceID, nil, 10000, 10180)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gid := ComputeGID(id.SigningPublicKey, serviceID)
+	for _, now := range []uint64{10000 - 60, 10000 - descriptorClockSkew, 10180 + 60, 10180 + descriptorClockSkew} {
+		if err := VerifyServiceDescriptor(d, gid, now); err != nil {
+			t.Errorf("now=%d: descriptor rejected within the clock skew tolerance: %v", now, err)
+		}
+	}
+	if err := VerifyServiceDescriptor(d, gid, 10000-descriptorClockSkew-1); !errors.Is(err, ErrDescriptorNotYetValid) {
+		t.Errorf("descriptor too far in the future accepted: %v", err)
+	}
+	if err := VerifyServiceDescriptor(d, gid, 10180+descriptorClockSkew+1); !errors.Is(err, ErrDescriptorExpired) {
+		t.Errorf("descriptor expired beyond the tolerance accepted: %v", err)
 	}
 }

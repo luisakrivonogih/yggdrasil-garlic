@@ -95,7 +95,7 @@ func (d *NetworkRendezvous) discover() {
 func (d *NetworkRendezvous) pruneLocked() {
 	now := uint64(time.Now().Unix())
 	for gid, r := range d.records {
-		if r.ExpiresAt < now {
+		if descriptorExpired(r, now) {
 			delete(d.records, gid)
 		}
 	}
