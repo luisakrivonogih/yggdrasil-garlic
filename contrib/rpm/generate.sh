@@ -107,7 +107,9 @@ fi
 
 if [ -s /etc/yggdrasil/yggdrasil.conf ]; then
   mkdir -p /var/backups
-  backup_path=/var/backups/yggdrasil.conf.\`date +%Y%m%d-%H%M%S\`
+  # rpm expands macros in scriptlets (comments included): a literal percent
+  # sign has to be doubled, as in the date format below.
+  backup_path=/var/backups/yggdrasil.conf.\`date +%%Y%%m%%d-%%H%%M%%S\`
   echo "Backing up configuration file to \$backup_path"
   cp /etc/yggdrasil/yggdrasil.conf "\$backup_path"
   chmod 640 "\$backup_path"
@@ -152,7 +154,11 @@ exit 0
 - See https://github.com/yggdrasil-network/yggdrasil-go/blob/develop/CHANGELOG.md
 EOF
 
-rpmbuild --define "_topdir $TOPDIR" --target "$RPMARCH" -bb "$TOPDIR/SPECS/$PKGNAME.spec"
+if ! rpmbuild --define "_topdir $TOPDIR" --target "$RPMARCH" -bb "$TOPDIR/SPECS/$PKGNAME.spec"; then
+  rm -rf $TOPDIR
+  echo "rpmbuild failed"
+  exit 1
+fi
 
 find $TOPDIR/RPMS -name '*.rpm' -exec cp {} "./$PKGFILE" \;
 rm -rf $TOPDIR
