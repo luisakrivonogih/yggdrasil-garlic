@@ -75,6 +75,7 @@ type GarlicConfig struct {
 	TrustOutboundPeers   bool                  `comment:"Also trust every connected outbound peer from your Peers list (not\nmulticast/LAN or inbound peers) as a first hop. Default false."`
 	OnionKeyRotation     string                `comment:"Relay mode: how often the onion key is replaced (Go duration). The\nprevious key is wiped after a grace period, so recorded traffic\ncannot be decrypted later even if this machine is compromised."`
 	BootstrapPeers       []string              `json:",omitempty" comment:"Deprecated alias of TrustedPeers."`
+	Guard                string                `json:",omitempty" comment:"Managed by the node: the trusted peer it uses as first hop, kept across\nrestarts so that the same guard keeps being used (as Tor does). Remove\nit to have a new one picked."`
 	SigningPrivateKey    KeyBytes              `json:",omitempty" comment:"This node's Garlic site signing key (Ed25519 seed, 32 bytes). Your\nhash.domains.yggg addresses are derived from it - keep it to keep\nyour domains. Independent of your main Yggdrasil key. Onion keys\nare separate, ephemeral and never stored."`
 	PathLength           int                   `comment:"Number of hops for circuits this node originates."`
 	CircuitLifetime      string                `comment:"Maximum lifetime of a circuit before it must be rebuilt (Go duration\nformat, e.g. \"10m\")."`

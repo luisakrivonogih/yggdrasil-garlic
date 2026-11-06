@@ -218,15 +218,17 @@ func (h *HostedService) refresh() error {
 				peers = append(peers, p)
 			}
 		}
-		// Independent cryptographic random order per service.
-		for i := len(peers) - 1; i > 0; i-- {
-			n, err := rand.Int(rand.Reader, big.NewInt(int64(i+1)))
-			if err != nil {
-				return err
-			}
-			j := int(n.Int64())
-			peers[i], peers[j] = peers[j], peers[i]
+		// Independent random order per service, weighted towards relays
+		// that have been working (recent failures push a relay back).
+		weights := make([][]byte, len(peers))
+		for i, p := range peers {
+			weights[i] = p.NodeKey
 		}
+		ordered := make([]DiscoveredPeer, 0, len(peers))
+		for _, i := range weightedOrder(h.g.health.weights(weights)) {
+			ordered = append(ordered, peers[i])
+		}
+		peers = ordered
 		var circuitErr error
 		for _, p := range peers {
 			if ctx.Err() != nil {
@@ -514,7 +516,12 @@ func (g *Garlic) dialSiteRelay(ctx context.Context, gid GID, d *ServiceDescripto
 			_, err := cert.Verify(x509.VerifyOptions{Roots: roots, DNSName: gid.Domain(), KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}})
 			return err
 		}}
+	dialStart := time.Now()
 	conn, err := tr.Dial(ctx, flowAddr(pc.id), tlsConf, siteQUICConfig())
+	// The QUIC handshake takes about one round trip over the whole path.
+	if cur := route.current.Load(); cur != nil && (err == nil || ctx.Err() == nil) {
+		g.pathOutcome(*cur, err == nil, time.Since(dialStart))
+	}
 	if err != nil {
 		return nil, err
 	}

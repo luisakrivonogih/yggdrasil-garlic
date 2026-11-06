@@ -112,6 +112,15 @@ type Config struct {
 	// non-link-local mesh peer (the operator's own Peers list).
 	TrustOutboundPeers bool
 
+	// Guard is the first hop to start with: the guard used before the last
+	// restart (persisted by the daemon), if it is still trusted. Keeping
+	// the same guard means fewer nodes ever see this node's circuits.
+	Guard []byte
+
+	// OnGuardChange, if set, is called (in its own goroutine) whenever a
+	// different trusted peer becomes the guard, so it can be persisted.
+	OnGuardChange func(key []byte)
+
 	// OnionKeyRotation is how often a relay replaces its onion key; the
 	// previous key is kept for a grace period and then wiped (onionkeys.go).
 	OnionKeyRotation time.Duration
@@ -281,10 +290,13 @@ type Garlic struct {
 	// sends (tests only: emulates link latency on a local mesh).
 	testLinkDelay time.Duration
 
-	trustMu   sync.Mutex
-	trusted   map[string][]byte    // configured and runtime-added trusted node keys
-	guard     []byte               // current trusted first hop
-	guardSeen map[string]time.Time // when each trusted peer last answered directly
+	health *relayHealth // relay failures and latency learned from circuits
+
+	trustMu    sync.Mutex
+	trusted    map[string][]byte    // configured and runtime-added trusted node keys
+	guard      []byte               // current trusted first hop
+	savedGuard []byte               // the guard last reported to OnGuardChange
+	guardSeen  map[string]time.Time // when each trusted peer last answered directly
 
 	mu              sync.Mutex
 	capabilityCache map[string]*cachedRelay
@@ -309,6 +321,7 @@ func New(c *core.Core, identity *Identity, cfg Config, rendezvous Rendezvous) *G
 		cfg:             cfg,
 		circuits:        NewCircuitManager(CircuitManagerConfig{MaxCircuits: cfg.MaxCircuits, MaxCircuitsPerPeer: cfg.MaxCircuitsPerPeer}),
 		relayState:      newRelayCircuitState(cfg.MaxRelayCircuits),
+		health:          newRelayHealth(),
 		limiter:         NewRateLimiter(cfg.RatePerSecond, cfg.RateBurst, cfg.MaxTrackedPeers),
 		siteLimiter:     NewRateLimiter(siteRatePerSecond, 2*siteRatePerSecond, cfg.MaxTrackedPeers),
 		rendezvous:      rendezvous,
@@ -327,6 +340,10 @@ func New(c *core.Core, identity *Identity, cfg Config, rendezvous Rendezvous) *G
 		if key, err := hex.DecodeString(strings.TrimSpace(k)); err == nil && len(key) == ed25519.PublicKeySize {
 			g.trusted[string(key)] = key
 		}
+	}
+	if _, ok := g.trusted[string(cfg.Guard)]; ok {
+		g.guard = bytes.Clone(cfg.Guard)
+		g.savedGuard = bytes.Clone(cfg.Guard)
 	}
 	if !cfg.Hidden {
 		rotation := max(cfg.OnionKeyRotation, 5*time.Minute)

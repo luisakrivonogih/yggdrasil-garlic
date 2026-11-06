@@ -297,15 +297,18 @@ func (r *siteRouter) register(ctx context.Context, id CircuitID, gateway []byte,
 	defer ticker.Stop()
 	timeout := time.NewTimer(4 * time.Second)
 	defer timeout.Stop()
+	start := time.Now()
 	for {
 		if err := r.g.sendDuplex(id, append([]byte{siteRegister}, body...)); err != nil {
 			return err
 		}
 		select {
 		case <-ack:
+			r.g.pathOutcome(id, true, time.Since(start))
 			return nil
 		case <-ticker.C:
 		case <-timeout.C:
+			r.g.pathOutcome(id, false, 0)
 			return errors.New("garlic: site relay registration timed out")
 		case <-ctx.Done():
 			return ctx.Err()

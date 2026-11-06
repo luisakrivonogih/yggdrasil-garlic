@@ -367,6 +367,23 @@ func main() {
 			gcfg.Hidden = hidden
 			gcfg.TrustedPeers = trustedPeers
 			gcfg.TrustOutboundPeers = cfg.Garlic.TrustOutboundPeers
+			if guard, err := hex.DecodeString(strings.TrimSpace(cfg.Garlic.Guard)); err == nil && len(guard) == ed25519.PublicKeySize {
+				gcfg.Guard = guard
+			}
+			if persister != nil {
+				gcfg.OnGuardChange = func(key []byte) {
+					if err := persister.update(func(c *config.NodeConfig) bool {
+						k := hex.EncodeToString(key)
+						if c.Garlic.Guard == k {
+							return false
+						}
+						c.Garlic.Guard = k
+						return true
+					}); err != nil {
+						logger.Warnf("Garlic: could not save the guard to %s: %v", persister.path, err)
+					}
+				}
+			}
 			gcfg.OnionKeyRotation = rotation
 			gcfg.AutoPoolEnabled = cfg.Garlic.AutoPoolEnabled
 			gcfg.AutoPoolSize = cfg.Garlic.AutoPoolSize

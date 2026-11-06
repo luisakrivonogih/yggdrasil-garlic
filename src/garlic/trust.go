@@ -340,8 +340,15 @@ func (g *Garlic) guardFor(ctx context.Context, need func(*CapabilityMessage) boo
 			continue
 		}
 		g.trustMu.Lock()
+		changed := !bytes.Equal(g.guard, key) && !bytes.Equal(g.savedGuard, key)
 		g.guard = bytes.Clone(key)
+		if changed {
+			g.savedGuard = bytes.Clone(key)
+		}
 		g.trustMu.Unlock()
+		if changed && g.cfg.OnGuardChange != nil {
+			go g.cfg.OnGuardChange(bytes.Clone(key))
+		}
 		return key, capability, nil
 	}
 	return nil, nil, ErrNoTrustedGuard
@@ -439,7 +446,7 @@ func (g *Garlic) buildPath(ctx context.Context, n int, terminal []byte, need fun
 				filtered = append(filtered, c)
 			}
 		}
-		selected, err := selectDiversePathFrom(filtered, middles, g.cfg.MinHopCount, map[string]bool{})
+		selected, err := selectWeightedMiddles(filtered, middles, g.cfg.MinHopCount, g.health.weights)
 		if err != nil {
 			return nil, nil, g.explainMiddleShortage(err, filtered, middles)
 		}

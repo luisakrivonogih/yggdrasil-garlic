@@ -108,11 +108,19 @@ func (g *Garlic) SetupAdminHandlers(a *admin.AdminSocket) {
 			known := g.KnownPeers()
 			relays := make([]map[string]interface{}, len(known))
 			for i, p := range known {
-				relays[i] = map[string]interface{}{
+				health := g.health.get(p.NodeKey)
+				relay := map[string]interface{}{
 					"key":             hex.EncodeToString(p.NodeKey),
 					"selfVerified":    p.SelfVerified,
 					"onionKeyExpires": p.ExpiresAt.UTC().Format(time.RFC3339),
+					"failScore":       float64(int(health.FailScore*100)) / 100,
+					"successes":       health.Successes,
+					"failures":        health.Failures,
 				}
+				if health.RTT > 0 {
+					relay["rttMillis"] = health.RTT.Milliseconds()
+				}
+				relays[i] = relay
 			}
 			out := map[string]interface{}{"mode": g.Mode(), "trusted": g.TrustedPeerKeys(), "relays": relays}
 			if guard := g.CurrentGuard(); guard != nil {

@@ -257,6 +257,7 @@ func (d *NetworkRendezvous) rpc(ctx context.Context, peer []byte, gid GID, recor
 		return directoryMessage{}, err
 	}
 	defer d.g.CloseCircuit(cid)
+	start := time.Now()
 	id, err := randomCircuitID()
 	if err != nil {
 		return directoryMessage{}, err
@@ -286,12 +287,14 @@ func (d *NetworkRendezvous) rpc(ctx context.Context, peer []byte, gid GID, recor
 		}
 		select {
 		case res := <-ch:
+			d.g.pathOutcome(cid, true, time.Since(start))
 			if res.GID != gid {
 				return directoryMessage{}, ErrDescriptorGIDMismatch
 			}
 			return res, nil
 		case <-ticker.C:
 		case <-timeout.C:
+			d.g.pathOutcome(cid, false, 0)
 			return directoryMessage{}, ErrDirectoryUnavailable
 		case <-ctx.Done():
 			return directoryMessage{}, ctx.Err()
@@ -347,7 +350,7 @@ func (d *NetworkRendezvous) walk(ctx context.Context, gid GID, untilFound bool) 
 	best := d.local(gid)
 	for queries := 0; queries < 24; {
 		var batch [][]byte
-		for _, peer := range closestDirectoryNodes(gid, nodes, directoryWidth) {
+		for _, peer := range d.g.failingLast(closestDirectoryNodes(gid, nodes, directoryWidth)) {
 			if !visited[string(peer)] {
 				visited[string(peer)] = true
 				batch = append(batch, peer)
