@@ -21,8 +21,12 @@
 #   REPO_BRANCH       branch to build (default: develop)
 #   WORKDIR           scratch dir for clone/build/toolchain (default: /opt/yggdrasil-installer)
 #   ENABLE_GARLIC     set to 0 to skip enabling Garlic in the config (default: 1)
-#   ENABLE_DASHBOARD  set to 0 to skip building/enabling the local operator
-#                     dashboard (default: 1). Needs Node.js at runtime (not
+#   ENABLE_DASHBOARD  1/0/auto: build and enable the local operator dashboard
+#                     (default: auto = only on machines with at least 2 GB
+#                     RAM; its build needs ~700 MB). It is optional and built
+#                     last: a failed dashboard build never stops Yggdrasil or
+#                     Garlic from being installed and configured. Needs
+#                     Node.js at runtime (not
 #                     just to build) - if none is found, a real Node.js
 #                     build is installed system-wide under /usr/local
 #                     (never touches a distro nodejs package), since the
@@ -35,6 +39,10 @@
 #                     from getSelf) of Garlic relays you trust as first hop,
 #                     written into Garlic.TrustedPeers.
 #
+# Small machines (less than ~1.5-2 GB of RAM + swap) get a temporary swap
+# file under WORKDIR for the duration of the build (removed afterwards) and
+# a one-package-at-a-time Go build, so the compiler is not OOM-killed.
+#
 # See docs/garlic-testing.md for how to actually exercise Garlic (build a
 # circuit, send/receive a payload) once this has installed and started it -
 # or, with the dashboard enabled, watch it happen at http://127.0.0.1:8080
@@ -46,7 +54,7 @@ REPO_URL=${REPO_URL:-https://github.com/luisakrivonogih/yggdrasil-go.git}
 REPO_BRANCH=${REPO_BRANCH:-develop}
 WORKDIR=${WORKDIR:-/opt/yggdrasil-installer}
 ENABLE_GARLIC=${ENABLE_GARLIC:-1}
-ENABLE_DASHBOARD=${ENABLE_DASHBOARD:-1}
+ENABLE_DASHBOARD=${ENABLE_DASHBOARD:-auto}
 GARLIC_MODE=${GARLIC_MODE:-relay}
 GARLIC_TRUSTED_PEERS=${GARLIC_TRUSTED_PEERS:-${GARLIC_BOOTSTRAP_PEERS:-}}
 
@@ -92,6 +100,77 @@ case "$(uname -m)" in
   *) die "unsupported architecture: $(uname -m) - build manually, see contrib/deb/generate.sh or contrib/rpm/generate.sh" ;;
 esac
 log "Detected $PKGKIND packaging, arch $PKGARCH"
+
+# ---- 2b. Memory: small VPS guard ----
+# Building is by far the heaviest thing this script does: a Go compile or
+# link step peaks at roughly 300-500 MB (one per CPU when run in parallel)
+# and the dashboard's Vite build at roughly 700 MB. On a small VPS without
+# swap that ends with the OOM killer, or with a machine swapping itself to
+# a standstill so the install looks hung. So on small machines: build Go
+# one package at a time, add a temporary swap file while building, and
+# leave out the optional dashboard unless explicitly asked for.
+meminfo_mb() { awk -v k="$1:" '$1 == k { printf "%d", $2 / 1024 }' /proc/meminfo 2>/dev/null; }
+MEM_MB=$(meminfo_mb MemTotal)
+SWAP_MB=$(meminfo_mb SwapTotal)
+case "$MEM_MB" in ''|*[!0-9]*) MEM_MB=0 ;; esac
+case "$SWAP_MB" in ''|*[!0-9]*) SWAP_MB=0 ;; esac
+log "Memory: ${MEM_MB} MB RAM, ${SWAP_MB} MB swap"
+case "$ENABLE_DASHBOARD" in
+  1|0) ;;
+  *)
+    if [ "$MEM_MB" -ge 1800 ]; then
+      ENABLE_DASHBOARD=1
+    else
+      ENABLE_DASHBOARD=0
+      log "Less than 2 GB of RAM - skipping the optional dashboard (its build needs ~700 MB and it keeps a Node.js process running next to yggdrasil); force it with ENABLE_DASHBOARD=1"
+    fi
+    ;;
+esac
+
+BUILD_SWAP="$WORKDIR/build.swap"
+remove_build_swap() {
+  [ -e "$BUILD_SWAP" ] || return 0
+  if grep -q "^$BUILD_SWAP[[:space:]]" /proc/swaps 2>/dev/null; then
+    if ! swapoff "$BUILD_SWAP" 2>/dev/null; then
+      log "Could not switch off the temporary swap file - remove it later with: swapoff $BUILD_SWAP && rm $BUILD_SWAP"
+      return 0
+    fi
+  fi
+  rm -f "$BUILD_SWAP"
+}
+# add_build_swap WANT_MB: make sure RAM + swap is at least WANT_MB while
+# building. Never fatal: containers (OpenVZ, LXC) usually cannot swapon.
+add_build_swap() {
+  _have=$((MEM_MB + SWAP_MB))
+  [ "$_have" -lt "$1" ] || return 0
+  _need=$(($1 - _have))
+  [ "$_need" -ge 512 ] || _need=512
+  if ! command -v mkswap >/dev/null 2>&1 || ! command -v swapon >/dev/null 2>&1; then
+    log "Low memory and no mkswap/swapon - building without extra swap"
+    return 0
+  fi
+  mkdir -p "$WORKDIR"
+  _free=$(df -Pm "$WORKDIR" 2>/dev/null | awk 'NR == 2 { print $4 }')
+  case "$_free" in ''|*[!0-9]*) _free=0 ;; esac
+  if [ "$_free" -lt $((_need + 1024)) ]; then
+    log "Low memory, but only ${_free} MB free disk in $WORKDIR - building without a temporary swap file"
+    return 0
+  fi
+  remove_build_swap
+  log "Low memory: adding a temporary ${_need} MB swap file for the build ($BUILD_SWAP, removed afterwards)"
+  if dd if=/dev/zero of="$BUILD_SWAP" bs=1M count="$_need" 2>/dev/null &&
+     chmod 600 "$BUILD_SWAP" &&
+     mkswap "$BUILD_SWAP" >/dev/null 2>&1 &&
+     swapon "$BUILD_SWAP" 2>/dev/null; then
+    return 0
+  fi
+  log "Could not enable a swap file here (a container without swap support?) - building without it"
+  rm -f "$BUILD_SWAP"
+}
+# Also cleans up after an earlier run that was interrupted mid-build.
+trap remove_build_swap EXIT
+trap 'exit 130' INT TERM HUP
+remove_build_swap
 
 # ---- 3. Build prerequisites ----
 case "$PKGKIND" in
@@ -224,6 +303,11 @@ if [ "$ENABLE_DASHBOARD" = "1" ]; then
 fi
 
 # ---- 7. Build and package ----
+if [ "$ENABLE_DASHBOARD" = "1" ]; then add_build_swap 2048; else add_build_swap 1536; fi
+if [ $((MEM_MB + SWAP_MB)) -lt 2048 ]; then
+  GOFLAGS="${GOFLAGS:+$GOFLAGS }-p=1"
+  export GOFLAGS
+fi
 log "Building and packaging ($PKGKIND, $PKGARCH) - first run also fetches the go.mod-pinned Go toolchain, can take a few minutes"
 rm -f ./*.deb ./*.rpm 2>/dev/null || true
 case "$PKGKIND" in
@@ -291,22 +375,13 @@ log "Installed $("$YGG" -version | tr '\n' ' ')at $YGG"
 # (Garlic disabled, the project default) and started the service - see
 # contrib/deb/generate.sh's postinst / contrib/rpm/generate.sh's %post.
 
-# ---- 9. Build and install the dashboard ----
-if [ "$ENABLE_DASHBOARD" = "1" ]; then
-  log "Building the dashboard (npm install && npm run build) - first run can take a minute"
-  ( cd "$SRC_DIR/yggdashboard" && npm install --no-audit --no-fund && npm run build )
-  DASHBOARD_INSTALL_DIR=/usr/lib/yggdrasil/dashboard
-  rm -rf "$DASHBOARD_INSTALL_DIR"
-  mkdir -p "$DASHBOARD_INSTALL_DIR"
-  cp -r "$SRC_DIR/yggdashboard/build/." "$DASHBOARD_INSTALL_DIR/"
-  chown -R root:yggdrasil "$DASHBOARD_INSTALL_DIR"
-  chmod -R go-w "$DASHBOARD_INSTALL_DIR"
-  log "Dashboard built assets installed to $DASHBOARD_INSTALL_DIR (yggdrasil's default search path, no Dashboard.Path config needed)"
-fi
-
-# ---- 10. Enable Garlic / the dashboard ----
-if [ "$ENABLE_GARLIC" = "1" ] || [ "$ENABLE_DASHBOARD" = "1" ] || [ -n "$GARLIC_TRUSTED_PEERS" ]; then
-  log "Updating /etc/yggdrasil/yggdrasil.conf (Garlic=$ENABLE_GARLIC, Mode=$GARLIC_MODE, Dashboard=$ENABLE_DASHBOARD)"
+# ---- 9. Enable Garlic (and, once it is built, the dashboard) ----
+# update_config DASH: apply the Garlic settings; DASH=1 also turns the
+# dashboard on (DASH=0 leaves Dashboard.Enabled as it is). Safe to run more
+# than once: TrustedPeers is merged, not appended twice.
+update_config() {
+  _dash=$1
+  log "Updating /etc/yggdrasil/yggdrasil.conf (Garlic=$ENABLE_GARLIC, Mode=$GARLIC_MODE, Dashboard=$_dash)"
   TMP_JSON="$WORKDIR/yggdrasil.json"
   mkdir -p "$WORKDIR"
   "$YGG" -useconffile /etc/yggdrasil/yggdrasil.conf -normaliseconf -json > "$TMP_JSON"
@@ -314,7 +389,7 @@ if [ "$ENABLE_GARLIC" = "1" ] || [ "$ENABLE_DASHBOARD" = "1" ] || [ -n "$GARLIC_
   EDITED=0
   if command -v jq >/dev/null 2>&1; then
     jq --argjson garlic "$([ "$ENABLE_GARLIC" = "1" ] && echo true || echo false)" \
-       --argjson dash "$([ "$ENABLE_DASHBOARD" = "1" ] && echo true || echo false)" \
+       --argjson dash "$([ "$_dash" = "1" ] && echo true || echo false)" \
        --arg trusted "$GARLIC_TRUSTED_PEERS" \
        --arg mode "$GARLIC_MODE" \
        '.Garlic.Enabled = (if $garlic then true else .Garlic.Enabled end)
@@ -323,7 +398,7 @@ if [ "$ENABLE_GARLIC" = "1" ] || [ "$ENABLE_DASHBOARD" = "1" ] || [ -n "$GARLIC_
         | .Garlic.TrustedPeers = (if $trusted != "" then ((.Garlic.TrustedPeers // []) + ($trusted | split(",")) | unique) else .Garlic.TrustedPeers end)' \
        "$TMP_JSON" > "$TMP_JSON.new" && EDITED=1
   elif command -v python3 >/dev/null 2>&1; then
-    ENABLE_GARLIC="$ENABLE_GARLIC" ENABLE_DASHBOARD="$ENABLE_DASHBOARD" GARLIC_TRUSTED_PEERS="$GARLIC_TRUSTED_PEERS" GARLIC_MODE="$GARLIC_MODE" python3 - "$TMP_JSON" > "$TMP_JSON.new" <<'PY' && EDITED=1
+    ENABLE_GARLIC="$ENABLE_GARLIC" ENABLE_DASHBOARD="$_dash" GARLIC_TRUSTED_PEERS="$GARLIC_TRUSTED_PEERS" GARLIC_MODE="$GARLIC_MODE" python3 - "$TMP_JSON" > "$TMP_JSON.new" <<'PY' && EDITED=1
 import json, os, sys
 with open(sys.argv[1]) as f:
     cfg = json.load(f)
@@ -350,7 +425,35 @@ PY
   else
     log "Neither jq nor python3 found - enable manually: set \"Garlic\": { \"Enabled\": true } and/or \"Dashboard\": { \"Enabled\": true } (and \"Mode\": \"relay\", \"TrustedPeers\": [...]) in /etc/yggdrasil/yggdrasil.conf, then run 'systemctl restart yggdrasil'"
   fi
+}
+if [ "$ENABLE_GARLIC" = "1" ] || [ -n "$GARLIC_TRUSTED_PEERS" ]; then
+  update_config 0
 fi
+
+# ---- 10. Build and install the dashboard (optional, last) ----
+# Built only after Yggdrasil and Garlic are installed, configured and
+# running, and never fatal: a small server that cannot build it still ends
+# up with a working node.
+if [ "$ENABLE_DASHBOARD" = "1" ]; then
+  log "Building the optional dashboard (npm install && npm run build) - can take a few minutes on a small server"
+  TIMEOUT=""
+  if command -v timeout >/dev/null 2>&1; then TIMEOUT="timeout 1800"; fi
+  if ( cd "$SRC_DIR/yggdashboard" && $TIMEOUT npm install --no-audit --no-fund && $TIMEOUT npm run build ); then
+    DASHBOARD_INSTALL_DIR=/usr/lib/yggdrasil/dashboard
+    rm -rf "$DASHBOARD_INSTALL_DIR"
+    mkdir -p "$DASHBOARD_INSTALL_DIR"
+    cp -r "$SRC_DIR/yggdashboard/build/." "$DASHBOARD_INSTALL_DIR/"
+    chown -R root:yggdrasil "$DASHBOARD_INSTALL_DIR"
+    chmod -R go-w "$DASHBOARD_INSTALL_DIR"
+    log "Dashboard built assets installed to $DASHBOARD_INSTALL_DIR (yggdrasil's default search path, no Dashboard.Path config needed)"
+    update_config 1
+  else
+    log "WARNING: the dashboard build failed or timed out (out of memory? check: free -m; dmesg | grep -i -e oom -e killed)."
+    log "Yggdrasil and Garlic are installed and running without it. Retry with more RAM/swap, or skip it with ENABLE_DASHBOARD=0."
+    ENABLE_DASHBOARD=0
+  fi
+fi
+remove_build_swap
 
 # ---- 11. Verify ----
 sleep 2
