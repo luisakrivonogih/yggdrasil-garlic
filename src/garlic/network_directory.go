@@ -26,16 +26,16 @@ const maxDirectoryRecords = 4096
 var ErrDirectoryUnavailable = errors.New("garlic: no reachable distributed directory peers")
 
 type directoryMessage struct {
-	ID     CircuitID
-	GID    GID
-	Store  *ServiceDescriptor `json:",omitempty"`
+	ID    CircuitID
+	GID   GID
+	Store *ServiceDescriptor `json:",omitempty"`
 	// Blinded records (version 2 GIDs, see blind.go): GID is then the
 	// blinded index key, never the site's GID.
-	StoreBlinded  *BlindedRecord `json:",omitempty"`
-	RecordBlinded *BlindedRecord `json:",omitempty"`
-	Record *ServiceDescriptor `json:",omitempty"`
-	Peers  [][]byte           `json:",omitempty"`
-	Stored bool               `json:",omitempty"`
+	StoreBlinded  *BlindedRecord     `json:",omitempty"`
+	RecordBlinded *BlindedRecord     `json:",omitempty"`
+	Record        *ServiceDescriptor `json:",omitempty"`
+	Peers         [][]byte           `json:",omitempty"`
+	Stored        bool               `json:",omitempty"`
 }
 type directoryPending struct {
 	circuit  CircuitID
@@ -368,10 +368,10 @@ type walkResult struct {
 	peers    [][]byte
 	record   *ServiceDescriptor
 	blinded  *BlindedRecord // for a blinded index key
-	known    int   // other directory nodes known or learned during the walk
-	asked    int   // how many of them were asked
-	answered int   // how many of them answered
-	lastErr  error // the last failed request, if any
+	known    int            // other directory nodes known or learned during the walk
+	asked    int            // how many of them were asked
+	answered int            // how many of them answered
+	lastErr  error          // the last failed request, if any
 }
 
 // unreachableErr explains a walk in which no other directory node
