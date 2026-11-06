@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -261,5 +262,40 @@ func TestTreeDistance(t *testing.T) {
 	}
 	if _, ok := treeDistance(parent, []byte("b"), []byte("x")); ok {
 		t.Error("distance to an unknown node reported as known")
+	}
+}
+
+// When every other relay is a direct mesh peer (closer than MinHopCount),
+// the error has to say so instead of a bare "not enough candidates".
+func TestBuildPathExplainsRelaysTooClose(t *testing.T) {
+	g := newTestGarlic(t)
+	g.cfg.MinHopCount = 2 // the unit fixture has no mesh: every relay is at distance 0
+	guard, middle, terminal := newTestRelay(t), newTestRelay(t), newTestRelay(t)
+	for _, r := range []*testRelay{guard, middle, terminal} {
+		if _, err := g.learnRelayInfo(r.info(t, nil, 3*time.Hour), r.nodePub); err != nil {
+			t.Fatal(err)
+		}
+	}
+	g.trusted[string(guard.nodePub)] = bytes.Clone(guard.nodePub)
+	_, _, err := g.buildPath(context.Background(), 3, terminal.nodePub, needSites)
+	if !errors.Is(err, ErrInsufficientDiverseCandidates) || !strings.Contains(err.Error(), "MinHopCount") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestDirectoryWalkErrorsNameTheCause(t *testing.T) {
+	g := newTestGarlic(t)
+	if err := (walkResult{}).unreachableErr(g); !errors.Is(err, ErrDirectoryUnavailable) || !errors.Is(err, ErrNoTrustedPeers) {
+		t.Fatalf("no trusted peers: %v", err)
+	}
+	g.trusted["k"] = []byte("k")
+	if err := (walkResult{}).unreachableErr(g); !errors.Is(err, ErrDirectoryUnavailable) || !strings.Contains(err.Error(), "no Garlic relays known") {
+		t.Fatalf("no relays known: %v", err)
+	}
+	if err := (walkResult{known: 3, lastErr: ErrNoTrustedGuard}).unreachableErr(g); !errors.Is(err, ErrNoTrustedGuard) {
+		t.Fatalf("cause not wrapped: %v", err)
+	}
+	if err := (walkResult{known: 3, answered: 1}).unreachableErr(g); err != nil {
+		t.Fatalf("a walk that reached a relay reported unreachable: %v", err)
 	}
 }

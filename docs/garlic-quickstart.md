@@ -113,6 +113,25 @@ Garlic: {
 Минимальная сеть для сайта с `PathLength: 3`: три relay. Хост и клиент
 используют guard, один промежуточный relay и relay сайта.
 
+Промежуточный relay должен быть не ближе `MinHopCount` (по умолчанию 2) переходов
+по сети Yggdrasil от узла. Поэтому relay, с которыми узел соединён напрямую
+(`Peers`), промежуточными быть не могут. Если хост или клиент напрямую соединён со
+всеми relay, цепочка не строится и сайт не публикуется. Подключайте скрытый узел
+только к его guard или задайте на нём `Garlic.MinHopCount: 1` (разумно, когда все
+relay ваши).
+
+### Если сайт не открывается
+
+| Ошибка на клиенте | Что значит |
+|---|---|
+| `GID not found: N directory relay(s) answered but none has it` | каталог доступен, но сайт не опубликован: смотрите `getGarlicServices` на хосте |
+| `no reachable distributed directory peers: no Garlic relays known yet` | клиент ещё не узнал relay от доверенных пиров: подождите минуту, проверьте `getGarlicPeers` |
+| `... not enough topologically diverse candidates: ... closer ...` | все relay соединены с узлом напрямую: см. абзац выше про `MinHopCount` |
+| `no trusted Garlic peers configured` | не задан `TrustedPeers` (или `addGarlicPeer` потерялся после перезапуска) |
+
+`addGarlicPeer` действует до перезапуска, как и `addPeer`. Постоянно — только через
+`Garlic.TrustedPeers` в конфиге (или `GARLIC_TRUSTED_PEERS` / `TRUSTED` при установке).
+
 ## 7. Что видит каждый участник
 
 | Участник | Что знает |

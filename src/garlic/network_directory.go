@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"slices"
 	"sync"
@@ -300,7 +301,36 @@ func (d *NetworkRendezvous) rpc(ctx context.Context, peer []byte, gid GID, recor
 	}
 }
 
-func (d *NetworkRendezvous) walk(ctx context.Context, gid GID) ([][]byte, *ServiceDescriptor) {
+// walkResult is the outcome of a directory walk: the closest reachable
+// directory nodes, the newest record found, and enough bookkeeping to tell
+// "nobody has this site" apart from "no directory node could be reached".
+type walkResult struct {
+	peers    [][]byte
+	record   *ServiceDescriptor
+	known    int   // other directory nodes known or learned during the walk
+	answered int   // how many of them answered
+	lastErr  error // the last failed request, if any
+}
+
+// unreachableErr explains a walk in which no other directory node
+// answered, or returns nil if one did.
+func (w walkResult) unreachableErr(g *Garlic) error {
+	switch {
+	case w.answered > 0:
+		return nil
+	case w.known == 0 && len(g.trustedPeerKeys()) == 0:
+		return fmt.Errorf("%w: %w", ErrDirectoryUnavailable, ErrNoTrustedPeers)
+	case w.known == 0:
+		return fmt.Errorf("%w: no Garlic relays known yet (they are learned from the trusted peers within a minute or two; check getGarlicPeers)", ErrDirectoryUnavailable)
+	case w.lastErr != nil:
+		return fmt.Errorf("%w: none of the %d known relays answered: %w", ErrDirectoryUnavailable, w.known, w.lastErr)
+	default:
+		return fmt.Errorf("%w: none of the %d known relays answered", ErrDirectoryUnavailable, w.known)
+	}
+}
+
+func (d *NetworkRendezvous) walk(ctx context.Context, gid GID) walkResult {
+	var w walkResult
 	nodes := d.seeds()
 	self := string(d.g.core.PublicKey())
 	visited := map[string]bool{self: true}
@@ -336,8 +366,10 @@ func (d *NetworkRendezvous) walk(ctx context.Context, gid GID) ([][]byte, *Servi
 		for range batch {
 			r := <-results
 			if r.err != nil {
+				w.lastErr = r.err
 				continue
 			}
+			w.answered++
 			reachable[string(r.peer)] = r.peer
 			for _, raw := range r.res.Peers {
 				if len(nodes) >= 256 {
@@ -354,7 +386,12 @@ func (d *NetworkRendezvous) walk(ctx context.Context, gid GID) ([][]byte, *Servi
 			}
 		}
 	}
-	return closestDirectoryNodes(gid, reachable, directoryWidth), best
+	w.known = len(nodes)
+	if _, ok := nodes[self]; ok {
+		w.known--
+	}
+	w.peers, w.record = closestDirectoryNodes(gid, reachable, directoryWidth), best
+	return w
 }
 
 func (d *NetworkRendezvous) Publish(gid GID, record *ServiceDescriptor) error {
@@ -363,9 +400,10 @@ func (d *NetworkRendezvous) Publish(gid GID, record *ServiceDescriptor) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	peers, _ := d.walk(ctx, gid)
+	w := d.walk(ctx, gid)
 	stored, remote := 0, 0
-	for _, peer := range peers {
+	var storeErr error
+	for _, peer := range w.peers {
 		if bytes.Equal(peer, d.g.core.PublicKey()) {
 			if d.store(gid, record) {
 				stored++
@@ -373,6 +411,9 @@ func (d *NetworkRendezvous) Publish(gid GID, record *ServiceDescriptor) error {
 			continue
 		}
 		res, err := d.rpc(ctx, peer, gid, record)
+		if err != nil {
+			storeErr = err
+		}
 		if err == nil && res.Stored {
 			stored++
 			remote++
@@ -382,7 +423,13 @@ func (d *NetworkRendezvous) Publish(gid GID, record *ServiceDescriptor) error {
 		}
 	}
 	if remote == 0 {
-		return ErrDirectoryUnavailable
+		if err := w.unreachableErr(d.g); err != nil {
+			return err
+		}
+		if storeErr != nil {
+			return fmt.Errorf("%w: storing the record failed: %w", ErrDirectoryUnavailable, storeErr)
+		}
+		return fmt.Errorf("%w: no directory relay accepted the record", ErrDirectoryUnavailable)
 	}
 	return nil
 }
@@ -396,12 +443,15 @@ func (d *NetworkRendezvous) Lookup(gid GID) (*ServiceDescriptor, error) {
 func (d *NetworkRendezvous) LookupContext(ctx context.Context, gid GID) (*ServiceDescriptor, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	_, record := d.walk(ctx, gid)
+	w := d.walk(ctx, gid)
+	if w.record != nil {
+		return cloneDescriptor(w.record), nil
+	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	if record == nil {
-		return nil, ErrGIDNotFound
+	if err := w.unreachableErr(d.g); err != nil {
+		return nil, err
 	}
-	return cloneDescriptor(record), nil
+	return nil, fmt.Errorf("%w: %d directory relay(s) answered but none has it - is the site running and published? check getGarlicServices on the hosting node", ErrGIDNotFound, w.answered)
 }

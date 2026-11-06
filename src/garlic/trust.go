@@ -30,6 +30,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"math/big"
 	"net"
 	"net/url"
@@ -401,7 +402,7 @@ func (g *Garlic) buildPath(ctx context.Context, n int, terminal []byte, need fun
 		}
 		selected, err := selectDiversePathFrom(filtered, middles, g.cfg.MinHopCount, map[string]bool{})
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, g.explainMiddleShortage(err, filtered, middles)
 		}
 		for _, c := range selected {
 			capability, _ := g.knownRelay(c.NodeKey)
@@ -414,6 +415,22 @@ func (g *Garlic) buildPath(ctx context.Context, n int, terminal []byte, need fun
 		keys = append(keys, bytes.Clone(terminal))
 	}
 	return path, keys, nil
+}
+
+// explainMiddleShortage says why no middle hop could be chosen. The usual
+// cause in a small network is that every relay is a direct mesh peer of
+// this node and so closer than MinHopCount.
+func (g *Garlic) explainMiddleShortage(err error, pool []HopCandidate, need int) error {
+	tooClose := 0
+	for _, c := range pool {
+		if c.HopCount < g.cfg.MinHopCount {
+			tooClose++
+		}
+	}
+	if tooClose > 0 {
+		return fmt.Errorf("%w: need %d middle relay(s) at least %d mesh hops away, but %d of the %d other known relays are closer (directly peered relays cannot be middle hops: peer this node with fewer relays, or set Garlic.MinHopCount to 1)", err, need, g.cfg.MinHopCount, tooClose, len(pool))
+	}
+	return fmt.Errorf("%w: need %d middle relay(s) besides the first hop and the destination, %d known", err, need, len(pool))
 }
 
 // contactablePeers are the nodes this node may contact directly for
