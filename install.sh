@@ -232,7 +232,16 @@ if [ -n "$SCRIPT_DIR" ] && grep -q '^module github.com/yggdrasil-network/yggdras
   if [ "${NO_UPDATE:-0}" != 1 ] && [ -d "$SRC_DIR/.git" ]; then
     log "Checking for newer commits (NO_UPDATE=1 to skip)"
     if [ -n "$SUDO_USER" ]; then _G="sudo -u $SUDO_USER git"; else _G=git; fi
+    _HEAD=$(git -C "$SRC_DIR" rev-parse HEAD 2>/dev/null || true)
     $_G -C "$SRC_DIR" pull --ff-only -q || log "git pull failed (local changes?), building the current checkout"
+    # This shell is still running the installer as it was before the pull;
+    # continue with the updated one.
+    if [ -z "$YGG_INSTALLER_REEXEC" ] && [ "$(git -C "$SRC_DIR" rev-parse HEAD 2>/dev/null || true)" != "$_HEAD" ]; then
+      log "Updated - continuing with the new installer"
+      YGG_INSTALLER_REEXEC=1 NO_UPDATE=1
+      export YGG_INSTALLER_REEXEC NO_UPDATE
+      exec sh "$SRC_DIR/install.sh"
+    fi
   fi
 else
   SRC_DIR="$WORKDIR/src"
