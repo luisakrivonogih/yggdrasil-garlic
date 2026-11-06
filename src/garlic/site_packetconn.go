@@ -3,6 +3,7 @@ package garlic
 import (
 	"context"
 	"crypto/rand"
+	mrand "math/rand/v2"
 	"net"
 	"os"
 	"sync"
@@ -99,6 +100,15 @@ func (r *siteRoute) send(body []byte, host bool) error {
 	return err
 }
 
+// sendCover sends a cover packet over the current circuit, if there is one.
+func (r *siteRoute) sendCover(body []byte) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.circuit != (CircuitID{}) {
+		_ = r.g.sendDuplex(r.circuit, body)
+	}
+}
+
 func (r *siteRoute) accepts(id CircuitID) bool {
 	current := r.current.Load()
 	return current != nil && *current == id
@@ -127,6 +137,41 @@ type sitePacketConn struct {
 	mu                          sync.Mutex
 	readDeadline, writeDeadline time.Time
 	wake                        chan struct{}
+	lastWrite                   atomic.Int64 // UnixNano of the last real packet sent
+}
+
+// Cover traffic on site circuits: while a connection sends nothing real,
+// it sends a random-size packet at random moments (every siteCoverMin to
+// siteCoverMin+siteCoverSpread). Relays cannot tell it from site traffic,
+// the site relay drops it, so idle and active periods look alike from the
+// outside. It costs well under 1 KiB/s per connection.
+const (
+	siteCoverIdle   = time.Second
+	siteCoverMin    = 500 * time.Millisecond
+	siteCoverSpread = 3 * time.Second
+)
+
+func (p *sitePacketConn) coverLoop() {
+	next := func() time.Duration { return siteCoverMin + time.Duration(mrand.Int64N(int64(siteCoverSpread))) }
+	t := time.NewTimer(next())
+	defer t.Stop()
+	for {
+		select {
+		case <-p.ctx.Done():
+			return
+		case <-t.C:
+		}
+		t.Reset(next())
+		if time.Since(time.Unix(0, p.lastWrite.Load())) < siteCoverIdle {
+			continue
+		}
+		body := make([]byte, 1+64+mrand.IntN(1400))
+		body[0] = siteCover
+		if _, err := rand.Read(body[1:]); err != nil {
+			continue
+		}
+		p.route.sendCover(body)
+	}
 }
 
 func newSitePacketConn(g *Garlic, gid GID, host bool, route *siteRoute) (*sitePacketConn, error) {
@@ -140,6 +185,9 @@ func newSitePacketConn(g *Garlic, gid GID, host bool, route *siteRoute) (*sitePa
 	if _, err := rand.Read(p.secret[:]); err != nil {
 		cancel()
 		return nil, err
+	}
+	if g.cfg.CoverTrafficEnabled {
+		go p.coverLoop()
 	}
 	return p, nil
 }
@@ -213,6 +261,7 @@ func (p *sitePacketConn) WriteTo(body []byte, addr net.Addr) (int, error) {
 	}
 	var peer CircuitID
 	copy(peer[:], a.IP.To16())
+	p.lastWrite.Store(time.Now().UnixNano())
 	var packet []byte
 	if p.host {
 		packet = append([]byte{siteServerPacket}, p.gid[:]...)

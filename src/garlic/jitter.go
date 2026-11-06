@@ -20,6 +20,7 @@ import (
 	"hash/fnv"
 	"math/big"
 	"net"
+	"sync/atomic"
 	"time"
 )
 
@@ -42,9 +43,23 @@ type jitterJob struct {
 // reordering for loss and collapses its sending rate.
 type jitterScheduler struct {
 	send  func(data []byte, addr net.Addr) error
-	lanes []chan jitterJob
+	lanes []*jitterLane
 	stop  chan struct{}
 }
+
+type jitterLane struct {
+	jobs chan jitterJob
+	last atomic.Int64 // UnixNano of the latest enqueueBurst on this lane
+}
+
+// burstIdle: a lane that carried no burst-mode packet for this long is
+// idle, and its next packet starts a new burst. It has to be longer than
+// the pauses inside a running QUIC transfer: at 50 ms the jitter also hit
+// those, and the delay spikes cut throughput over a 20 ms-per-hop path
+// from ~5 MiB/s to ~0.45 MiB/s. At 500 ms it marks real activity starts
+// (a click, a new request after a pause) - the moments an observer would
+// try to match between a relay's input and output.
+const burstIdle = 500 * time.Millisecond
 
 // newJitterScheduler starts a scheduler with workers lanes, each a
 // goroutine draining a FIFO queue of capacity queueSize. workers may be 0
@@ -53,7 +68,7 @@ type jitterScheduler struct {
 func newJitterScheduler(send func(data []byte, addr net.Addr) error, queueSize, workers int) *jitterScheduler {
 	s := &jitterScheduler{send: send, stop: make(chan struct{})}
 	for range max(workers, 1) {
-		s.lanes = append(s.lanes, make(chan jitterJob, max(queueSize, 1)))
+		s.lanes = append(s.lanes, &jitterLane{jobs: make(chan jitterJob, max(queueSize, 1))})
 	}
 	for i := range workers {
 		go s.worker(s.lanes[i])
@@ -61,12 +76,12 @@ func newJitterScheduler(send func(data []byte, addr net.Addr) error, queueSize, 
 	return s
 }
 
-func (s *jitterScheduler) worker(lane chan jitterJob) {
+func (s *jitterScheduler) worker(lane *jitterLane) {
 	timer := time.NewTimer(time.Hour)
 	timer.Stop()
 	for {
 		select {
-		case job := <-lane:
+		case job := <-lane.jobs:
 			if d := time.Until(job.sendAt); d > 0 {
 				timer.Reset(d)
 				select {
@@ -82,7 +97,7 @@ func (s *jitterScheduler) worker(lane chan jitterJob) {
 	}
 }
 
-func (s *jitterScheduler) lane(addr net.Addr) chan jitterJob {
+func (s *jitterScheduler) lane(addr net.Addr) *jitterLane {
 	if len(s.lanes) == 1 {
 		return s.lanes[0]
 	}
@@ -92,13 +107,32 @@ func (s *jitterScheduler) lane(addr net.Addr) chan jitterJob {
 }
 
 func (s *jitterScheduler) enqueue(data []byte, addr net.Addr, delay time.Duration) bool {
+	return s.push(s.lane(addr), data, addr, delay)
+}
+
+// enqueueBurst is for streams (site traffic): only the first packet of a
+// burst - after the lane was idle for burstIdle - gets the random jitter
+// delay; the rest of the burst follows it in order with no added delay.
+// The moment a burst starts (a request, a response) is blurred at every
+// hop, while a stream keeps its throughput. extra is added to every packet.
+func (s *jitterScheduler) enqueueBurst(data []byte, addr net.Addr, extra time.Duration, jitter func() time.Duration) bool {
+	l := s.lane(addr)
+	now := time.Now().UnixNano()
+	delay := extra
+	if prev := l.last.Swap(now); now-prev > int64(burstIdle) {
+		delay += jitter()
+	}
+	return s.push(l, data, addr, delay)
+}
+
+func (s *jitterScheduler) push(l *jitterLane, data []byte, addr net.Addr, delay time.Duration) bool {
 	select {
 	case <-s.stop:
 		return false
 	default:
 	}
 	select {
-	case s.lane(addr) <- jitterJob{data: data, addr: addr, sendAt: time.Now().Add(delay)}:
+	case l.jobs <- jitterJob{data: data, addr: addr, sendAt: time.Now().Add(delay)}:
 		return true
 	default:
 		return false

@@ -25,6 +25,9 @@ const (
 	siteToClient
 	siteDirectoryRequest
 	siteDirectoryResponse
+	// siteCover is cover traffic: random bytes the endpoints send while
+	// idle, dropped by the site relay (older relays ignore unknown ops).
+	siteCover
 )
 
 const maxSiteFlows = 2048
@@ -167,6 +170,9 @@ func (r *siteRouter) handle(e siteEvent) {
 		return
 	}
 	switch op {
+	case siteCover:
+		// Cover traffic: looks like site traffic to every relay on the
+		// way, carries nothing.
 	case siteDirectoryRequest:
 		r.g.directory.handleRequest(e.circuit, body)
 	case siteRegister:

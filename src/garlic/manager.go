@@ -188,6 +188,10 @@ const jitterWorkers = 16
 // throughput cap: 512/s held sites to roughly 300 KiB/s.
 const siteRatePerSecond = 8192
 
+// siteBurstMaxJitter caps the random delay of a site burst's first packet
+// per hop: it is added to the latency of every request after a pause.
+const siteBurstMaxJitter = 30 * time.Millisecond
+
 var (
 	ErrInvalidPath                  = errors.New("garlic: invalid circuit path")
 	ErrCircuitNotFound              = errors.New("garlic: circuit not found")
@@ -272,6 +276,10 @@ type Garlic struct {
 	selfInfoMu  sync.Mutex
 	selfInfo    *RelayInfo
 	selfInfoRaw []byte
+
+	// testLinkDelay adds a fixed delay to every circuit packet this node
+	// sends (tests only: emulates link latency on a local mesh).
+	testLinkDelay time.Duration
 
 	trustMu   sync.Mutex
 	trusted   map[string][]byte    // configured and runtime-added trusted node keys
@@ -369,17 +377,34 @@ func (g *Garlic) sendCircuitData(msg []byte, addr net.Addr) {
 		g.handleIncoming(g.core.PublicKey(), msg)
 		return
 	}
+	// Site traffic (QUIC streams in duplex circuits) gets burst jitter: a
+	// random delay for the first packet after an idle moment, none inside
+	// a burst. Per-packet delay on a congestion-controlled stream costs
+	// nearly all of its throughput (measured: about 9 MiB/s without,
+	// 0.1-0.4 MiB/s with 0-75 ms per packet and hop).
+	if len(msg) > 0 && (msg[0] == msgTypeDuplexData || msg[0] == msgTypeCircuitReply) {
+		jitter := func() time.Duration { return 0 }
+		if g.cfg.JitterEnabled {
+			jitter = func() time.Duration {
+				d, err := randomJitter(min(g.cfg.MinJitter, siteBurstMaxJitter), min(g.cfg.MaxJitter, siteBurstMaxJitter))
+				if err != nil {
+					return 0
+				}
+				return d
+			}
+		}
+		if !g.scheduler.enqueueBurst(msg, addr, g.testLinkDelay, jitter) {
+			_, _ = g.core.WriteGarlic(msg, addr)
+		}
+		return
+	}
 	var delay time.Duration
-	// Site traffic (QUIC streams in duplex circuits) is not jittered: a
-	// congestion-controlled stream turns every added per-packet delay into
-	// lost throughput (measured: about 9 MiB/s without, 0.1-0.4 MiB/s with
-	// 0-75 ms per hop), while flow-level timing and volume - what
-	// correlation of such streams relies on - stay visible anyway.
-	if g.cfg.JitterEnabled && len(msg) > 0 && msg[0] != msgTypeDuplexData && msg[0] != msgTypeCircuitReply {
+	if g.cfg.JitterEnabled {
 		if d, err := randomJitter(g.cfg.MinJitter, g.cfg.MaxJitter); err == nil {
 			delay = d
 		}
 	}
+	delay += g.testLinkDelay
 	if !g.scheduler.enqueue(msg, addr, delay) {
 		_, _ = g.core.WriteGarlic(msg, addr)
 	}

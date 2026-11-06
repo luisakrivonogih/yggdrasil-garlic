@@ -18,7 +18,7 @@ import (
 
 // siteDownload measures one site download over a 5-node mesh (hidden host,
 // three relays, hidden client) with the default jitter settings.
-func siteDownload(t *testing.T, jitter bool, size int) time.Duration {
+func siteDownload(t *testing.T, jitter bool, linkDelay time.Duration, size int) time.Duration {
 	cfg := garlic.DefaultConfig()
 	cfg.PathLength = 3
 	cfg.MinHopCount = 0
@@ -42,7 +42,9 @@ func siteDownload(t *testing.T, jitter bool, size int) time.Duration {
 			c.TrustedPeers = []string{hex.EncodeToString(cores[1].PublicKey())}
 		}
 		nodes = append(nodes, n)
-		overlays = append(overlays, garlic.New(n, id, c, nil))
+		g := garlic.New(n, id, c, nil)
+		garlic.SetLinkDelayForTest(g, linkDelay)
+		overlays = append(overlays, g)
 	}
 	t.Cleanup(func() {
 		for _, g := range overlays {
@@ -103,17 +105,26 @@ func siteDownload(t *testing.T, jitter bool, size int) time.Duration {
 	return time.Since(start)
 }
 
-// Opt-in measurement (GARLIC_SPEED=1): site throughput with and without
-// relay jitter.
+// Opt-in measurement (GARLIC_SPEED=1): site throughput without and with
+// relay jitter, on a local mesh and with emulated per-hop latency.
 func TestSiteSpeed(t *testing.T) {
 	if os.Getenv("GARLIC_SPEED") == "" {
 		t.Skip("set GARLIC_SPEED=1 to measure site throughput")
 	}
-	const size = 2 << 20
-	for _, jitter := range []bool{false, true} {
-		t.Run(map[bool]string{false: "jitter-off", true: "jitter-on"}[jitter], func(t *testing.T) {
-			d := siteDownload(t, jitter, size)
-			t.Logf("%d KiB in %v = %.0f KiB/s", size>>10, d.Round(time.Millisecond), float64(size>>10)/d.Seconds())
+	const size = 4 << 20
+	for _, tc := range []struct {
+		name   string
+		jitter bool
+		delay  time.Duration
+	}{
+		{"local/jitter-off", false, 0},
+		{"local/jitter-on", true, 0},
+		{"20ms-per-hop/jitter-off", false, 20 * time.Millisecond},
+		{"20ms-per-hop/jitter-on", true, 20 * time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := siteDownload(t, tc.jitter, tc.delay, size)
+			t.Logf("%s: %d KiB in %v = %.0f KiB/s", tc.name, size>>10, d.Round(time.Millisecond), float64(size>>10)/d.Seconds())
 		})
 	}
 }

@@ -208,3 +208,48 @@ func TestJitterSchedulerKeepsOrderPerDestination(t *testing.T) {
 		}
 	}
 }
+
+// Burst mode: the first packet after an idle lane gets the random delay,
+// the packets right behind it follow in order without adding their own.
+func TestJitterSchedulerBurstDelaysOnlyTheBurstStart(t *testing.T) {
+	var mu sync.Mutex
+	var order []byte
+	var times []time.Time
+	done := make(chan struct{}, 64)
+	s := newJitterScheduler(func(data []byte, addr net.Addr) error {
+		mu.Lock()
+		order = append(order, data[0])
+		times = append(times, time.Now())
+		mu.Unlock()
+		done <- struct{}{}
+		return nil
+	}, 64, 4)
+	defer s.Stop()
+	const delay = 150 * time.Millisecond
+	start := time.Now()
+	for i := range 20 {
+		if !s.enqueueBurst([]byte{byte(i)}, fakeAddr("bob"), 0, func() time.Duration { return delay }) {
+			t.Fatal("queue full")
+		}
+	}
+	for range 20 {
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out")
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for i, b := range order {
+		if b != byte(i) {
+			t.Fatalf("packet %d sent in position %d", b, i)
+		}
+	}
+	if first := times[0].Sub(start); first < delay {
+		t.Fatalf("burst start sent after %v, want at least %v", first, delay)
+	}
+	if spread := times[19].Sub(times[0]); spread > delay/2 {
+		t.Fatalf("the rest of the burst took %v after its first packet: packets inside a burst must not add delay", spread)
+	}
+}

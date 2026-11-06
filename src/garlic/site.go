@@ -56,8 +56,15 @@ type HostedService struct {
 	connections, streams chan struct{}
 }
 
+// siteQUICConfig: site packets carry up to 2048 bytes of QUIC (see the
+// site router), so 1400-byte packets fit with room for headers. Receive
+// windows bound throughput to window/RTT, and a site path crosses six
+// relays: 256 KiB per stream allowed only ~0.5 MiB/s at a 0.5 s RTT.
+// quic-go grows a window from its initial size only as far as the
+// application needs it, so the larger maximum costs memory only while a
+// reader falls behind.
 func siteQUICConfig() *quic.Config {
-	return &quic.Config{HandshakeIdleTimeout: 15 * time.Second, MaxIdleTimeout: 60 * time.Second, KeepAlivePeriod: 15 * time.Second, MaxIncomingStreams: 4, MaxIncomingUniStreams: -1, InitialPacketSize: 1200, DisablePathMTUDiscovery: true, MaxStreamReceiveWindow: 256 << 10, MaxConnectionReceiveWindow: 1 << 20}
+	return &quic.Config{HandshakeIdleTimeout: 15 * time.Second, MaxIdleTimeout: 60 * time.Second, KeepAlivePeriod: 15 * time.Second, MaxIncomingStreams: 4, MaxIncomingUniStreams: -1, InitialPacketSize: 1400, DisablePathMTUDiscovery: true, MaxStreamReceiveWindow: 4 << 20, MaxConnectionReceiveWindow: 8 << 20}
 }
 
 // siteCertificate is the site's self-signed TLS certificate. Clients check

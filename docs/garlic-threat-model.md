@@ -315,11 +315,20 @@ default, others available on request:
   means jitter is skipped (packet sent immediately) once a lane is full
   under load — an adversary who can induce that load degrades this
   defense as a side effect. Site traffic (QUIC streams in duplex
-  circuits) is not jittered: per-packet delay on a congestion-controlled
-  stream cost almost all of its throughput (measured ~9 MiB/s without vs
-  0.1-0.4 MiB/s with 0-75 ms per hop on a local 5-node mesh), while the
-  flow-level timing and volume that correlating such a stream relies on
-  stay visible either way.
+  circuits) gets *burst* jitter instead: only the first packet after
+  500 ms of quiet on a lane is delayed (randomly, up to 30 ms per hop),
+  and the rest of the burst follows it in order. That blurs when an
+  activity starts (a click, a request) at every hop without slowing a
+  running transfer. Per-packet delay on a congestion-controlled stream
+  cost almost all of its throughput (measured ~9 MiB/s without vs
+  0.1-0.4 MiB/s with 0-75 ms per packet and hop on a local 5-node mesh;
+  a 50 ms quiet threshold still cut a 20 ms-per-hop path from ~5 to
+  ~0.45 MiB/s). Flow-level volume over longer periods stays visible.
+- **Cover traffic on site circuits** (`CoverTrafficEnabled`): while a site
+  connection sends nothing, each end sends a random-size packet every
+  0.5-3.5 s. Every relay forwards it like site traffic; the site relay
+  drops it. Idle and active periods are harder to tell apart for an
+  observer of a hop; the site relay itself can tell cover from data.
 - **Cover traffic via bundling** (`SendGarlicBundled`,
   `docs/garlic-protocol.md` §7): opt-in per call — a caller that never
   sets `coverCount > 0` gets none of this benefit, and even with cover
