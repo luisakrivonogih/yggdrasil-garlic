@@ -308,6 +308,7 @@ type walkResult struct {
 	peers    [][]byte
 	record   *ServiceDescriptor
 	known    int   // other directory nodes known or learned during the walk
+	asked    int   // how many of them were asked
 	answered int   // how many of them answered
 	lastErr  error // the last failed request, if any
 }
@@ -329,7 +330,12 @@ func (w walkResult) unreachableErr(g *Garlic) error {
 	}
 }
 
-func (d *NetworkRendezvous) walk(ctx context.Context, gid GID) walkResult {
+// walk queries directory nodes, closest to gid first. A lookup (untilFound)
+// stops after the first round that returned a valid record: every replica
+// holds the same signed record, and asking the remaining (possibly offline)
+// nodes would only add their timeouts. Publication walks the whole
+// neighbourhood to find the closest reachable nodes.
+func (d *NetworkRendezvous) walk(ctx context.Context, gid GID, untilFound bool) walkResult {
 	var w walkResult
 	nodes := d.seeds()
 	self := string(d.g.core.PublicKey())
@@ -362,6 +368,7 @@ func (d *NetworkRendezvous) walk(ctx context.Context, gid GID) walkResult {
 		for _, peer := range batch {
 			go func(peer []byte) { res, err := d.rpc(ctx, peer, gid, nil); results <- result{peer, res, err} }(peer)
 			queries++
+			w.asked++
 		}
 		for range batch {
 			r := <-results
@@ -385,6 +392,9 @@ func (d *NetworkRendezvous) walk(ctx context.Context, gid GID) walkResult {
 				best = record
 			}
 		}
+		if untilFound && best != nil {
+			break
+		}
 	}
 	w.known = len(nodes)
 	if _, ok := nodes[self]; ok {
@@ -400,7 +410,7 @@ func (d *NetworkRendezvous) Publish(gid GID, record *ServiceDescriptor) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	w := d.walk(ctx, gid)
+	w := d.walk(ctx, gid, false)
 	stored, remote := 0, 0
 	var storeErr error
 	for _, peer := range w.peers {
@@ -442,12 +452,19 @@ func (d *NetworkRendezvous) Lookup(gid GID) (*ServiceDescriptor, error) {
 func (d *NetworkRendezvous) LookupContext(ctx context.Context, gid GID) (*ServiceDescriptor, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	w := d.walk(ctx, gid)
+	w := d.walk(ctx, gid, true)
 	if w.record != nil {
 		return cloneDescriptor(w.record), nil
 	}
 	if ctx.Err() != nil {
-		return nil, ctx.Err()
+		cause := "none answered"
+		if w.answered > 0 {
+			cause = fmt.Sprintf("%d answered but none has the site", w.answered)
+		}
+		if w.lastErr != nil {
+			cause += "; last failure: " + w.lastErr.Error()
+		}
+		return nil, fmt.Errorf("garlic: site lookup timed out - asked %d of %d known directory relays, %s: %w", w.asked, w.known, cause, ctx.Err())
 	}
 	if err := w.unreachableErr(d.g); err != nil {
 		return nil, err
