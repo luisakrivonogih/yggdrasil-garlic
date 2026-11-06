@@ -40,9 +40,13 @@ import (
 // options that are necessary for an Yggdrasil node to run. You will need to
 // supply one of these structs to the Yggdrasil core when starting a node.
 type NodeConfig struct {
-	PrivateKey          KeyBytes                   `json:",omitempty" comment:"Your private key. DO NOT share this with anyone!"`
-	PrivateKeyPath      string                     `json:",omitempty" comment:"The path to your private key file in PEM format."`
-	Certificate         *tls.Certificate           `json:"-"`
+	PrivateKey     KeyBytes         `json:",omitempty" comment:"Your private key. DO NOT share this with anyone!"`
+	PrivateKeyPath string           `json:",omitempty" comment:"The path to your private key file in PEM format."`
+	Certificate    *tls.Certificate `json:"-"`
+	// GeneratedSigningKey reports that the config had no
+	// Garlic.SigningPrivateKey and a new one was generated while reading
+	// it; whoever wrote the config should save it (domains derive from it).
+	GeneratedSigningKey bool                       `json:"-"`
 	Peers               []string                   `comment:"List of outbound peer connection strings (e.g. tls://a.b.c.d:e or\nsocks://a.b.c.d:e/f.g.h.i:j). Connection strings can contain options,\nsee https://yggdrasil-network.github.io/configurationref.html#peers.\nYggdrasil has no concept of bootstrap nodes - all network traffic\nwill transit peer connections. Therefore make sure to only peer with\nnearby nodes that have good connectivity and low latency. Avoid adding\npeers to this list from distant countries as this will worsen your\nnode's connectivity and performance considerably."`
 	InterfacePeers      map[string][]string        `comment:"List of connection strings for outbound peer connections in URI format,\narranged by source interface, e.g. { \"eth0\": [ \"tls://a.b.c.d:e\" ] }.\nYou should only use this option if your machine is multi-homed and you\nwant to establish outbound peer connections on different interfaces.\nOtherwise you should use \"Peers\"."`
 	Listen              []string                   `comment:"Listen addresses for incoming connections. You will need to add\nlisteners in order to accept incoming peerings from non-local nodes.\nThis is not required if you wish to establish outbound peerings only.\nMulticast peer discovery will work regardless of any listeners set\nhere. Each listener should be specified in URI format as above, e.g.\ntls://0.0.0.0:0 or tls://[::]:0 to listen on all interfaces."`
@@ -220,6 +224,10 @@ func (cfg *NodeConfig) ReadFrom(r io.Reader) (int64, error) {
 }
 
 func (cfg *NodeConfig) UnmarshalHJSON(b []byte) error {
+	// The signing key comes from the config text or is generated (and
+	// flagged) in postprocessConfig - never left over from defaults.
+	cfg.Garlic.SigningPrivateKey = nil
+	cfg.GeneratedSigningKey = false
 	if err := hjson.Unmarshal(b, cfg); err != nil {
 		return err
 	}
@@ -227,6 +235,17 @@ func (cfg *NodeConfig) UnmarshalHJSON(b []byte) error {
 }
 
 func (cfg *NodeConfig) postprocessConfig() error {
+	// Site domains derive from the Garlic signing key: a config without one
+	// gets one now, so -normaliseconf (run on every package install) writes
+	// it out once and the domains stay the same from then on.
+	if len(cfg.Garlic.SigningPrivateKey) == 0 {
+		seed := make([]byte, ed25519.SeedSize)
+		if _, err := rand.Read(seed); err != nil {
+			return err
+		}
+		cfg.Garlic.SigningPrivateKey = seed
+		cfg.GeneratedSigningKey = true
+	}
 	if cfg.PrivateKeyPath != "" {
 		cfg.PrivateKey = nil
 		f, err := os.ReadFile(cfg.PrivateKeyPath)

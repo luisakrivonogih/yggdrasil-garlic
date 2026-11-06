@@ -310,10 +310,16 @@ default, others available on request:
   sizes a sustained flow produces — an adversary with enough samples on
   both ends can still attempt statistical (not exact) size correlation.
 - **Per-packet jitter** (`Config.JitterEnabled`, same section): breaks
-  exact send-timestamp correlation across hops. A bounded worker pool
-  and queue mean jitter is skipped (packet sent immediately) once the
-  queue is full under load — an adversary who can induce that load
-  degrades this defense as a side effect.
+  exact send-timestamp correlation across hops. Packets to one next hop
+  keep their order (one FIFO lane per destination). A bounded queue
+  means jitter is skipped (packet sent immediately) once a lane is full
+  under load — an adversary who can induce that load degrades this
+  defense as a side effect. Site traffic (QUIC streams in duplex
+  circuits) is not jittered: per-packet delay on a congestion-controlled
+  stream cost almost all of its throughput (measured ~9 MiB/s without vs
+  0.1-0.4 MiB/s with 0-75 ms per hop on a local 5-node mesh), while the
+  flow-level timing and volume that correlating such a stream relies on
+  stay visible either way.
 - **Cover traffic via bundling** (`SendGarlicBundled`,
   `docs/garlic-protocol.md` §7): opt-in per call — a caller that never
   sets `coverCount > 0` gets none of this benefit, and even with cover

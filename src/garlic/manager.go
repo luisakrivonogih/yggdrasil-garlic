@@ -177,10 +177,16 @@ func DefaultConfig() Config {
 	}
 }
 
-// jitterWorkers is the fixed size of the jitter scheduler's worker pool.
-// Not exposed in Config: it bounds concurrency, not memory, and the
+// jitterWorkers is the number of jitter scheduler lanes (one goroutine
+// each). Not exposed in Config: it bounds concurrency, not memory, and the
 // queue size is the DoS-relevant knob.
 const jitterWorkers = 16
+
+// siteRatePerSecond bounds site traffic (duplex data and replies) accepted
+// from one previous hop. All site traffic of a circuit arrives from the
+// same previous hop, so this is effectively a per-circuit-neighbour
+// throughput cap: 512/s held sites to roughly 300 KiB/s.
+const siteRatePerSecond = 8192
 
 var (
 	ErrInvalidPath                  = errors.New("garlic: invalid circuit path")
@@ -296,7 +302,7 @@ func New(c *core.Core, identity *Identity, cfg Config, rendezvous Rendezvous) *G
 		circuits:        NewCircuitManager(CircuitManagerConfig{MaxCircuits: cfg.MaxCircuits, MaxCircuitsPerPeer: cfg.MaxCircuitsPerPeer}),
 		relayState:      newRelayCircuitState(cfg.MaxRelayCircuits),
 		limiter:         NewRateLimiter(cfg.RatePerSecond, cfg.RateBurst, cfg.MaxTrackedPeers),
-		siteLimiter:     NewRateLimiter(512, 1024, cfg.MaxTrackedPeers),
+		siteLimiter:     NewRateLimiter(siteRatePerSecond, 2*siteRatePerSecond, cfg.MaxTrackedPeers),
 		rendezvous:      rendezvous,
 		discovery:       newDiscoveryRegistry(cfg.MaxDiscoveredPeers, c.PublicKey()),
 		delivered:       make(chan DeliveredMessage, 256),
@@ -364,7 +370,12 @@ func (g *Garlic) sendCircuitData(msg []byte, addr net.Addr) {
 		return
 	}
 	var delay time.Duration
-	if g.cfg.JitterEnabled {
+	// Site traffic (QUIC streams in duplex circuits) is not jittered: a
+	// congestion-controlled stream turns every added per-packet delay into
+	// lost throughput (measured: about 9 MiB/s without, 0.1-0.4 MiB/s with
+	// 0-75 ms per hop), while flow-level timing and volume - what
+	// correlation of such streams relies on - stay visible anyway.
+	if g.cfg.JitterEnabled && len(msg) > 0 && msg[0] != msgTypeDuplexData && msg[0] != msgTypeCircuitReply {
 		if d, err := randomJitter(g.cfg.MinJitter, g.cfg.MaxJitter); err == nil {
 			delay = d
 		}

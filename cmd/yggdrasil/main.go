@@ -195,6 +195,22 @@ func main() {
 		return
 	}
 
+	// Runtime changes (peers, a missing Garlic signing key, new domains)
+	// are written back to the config file the node was started with.
+	var persister *configPersister
+	if *useconffile != "" {
+		persister = &configPersister{path: *useconffile, privateKey: privateKey, signingKey: cfg.Garlic.SigningPrivateKey}
+		if cfg.GeneratedSigningKey {
+			if err := persister.update(func(c *config.NodeConfig) bool { return c.GeneratedSigningKey }); err != nil {
+				logger.Warnf("Garlic.SigningPrivateKey was missing and could not be saved to %s (%v): site domains will change on every restart", *useconffile, err)
+			} else {
+				logger.Infof("Saved a new Garlic.SigningPrivateKey to %s: site domains stay the same from now on", *useconffile)
+			}
+		}
+	} else if cfg.GeneratedSigningKey && len(cfg.Garlic.Services) > 0 {
+		logger.Warnln("No Garlic.SigningPrivateKey in a config read from stdin: site domains will change on every restart")
+	}
+
 	n := &node{}
 
 	// Set up the Yggdrasil node itself.
@@ -307,8 +323,6 @@ func main() {
 				if identity, err = garlic.LoadIdentityFromPrivateKeys(identity.PrivateKey, cfg.Garlic.SigningPrivateKey); err != nil {
 					panic(err)
 				}
-			} else if len(cfg.Garlic.Services) > 0 {
-				logger.Warnln("No Garlic.SigningPrivateKey configured - your site domains will change on every restart")
 			}
 			var hidden bool
 			switch strings.ToLower(strings.TrimSpace(cfg.Garlic.Mode)) {
@@ -407,8 +421,11 @@ func main() {
 	// Peers added or removed at runtime (addPeer, addGarlicPeer, ...) are
 	// written back to the config file, so they survive restarts and
 	// reinstalls. Not possible with -useconf (config from stdin).
-	if n.admin != nil && *useconffile != "" {
-		setupConfigPersistence(n.admin, &configPersister{path: *useconffile, privateKey: privateKey}, logger)
+	if n.admin != nil && persister != nil {
+		setupConfigPersistence(n.admin, persister, logger)
+		if n.garlic != nil {
+			setupDomainCommands(n.admin, persister, cfg.Garlic.Services)
+		}
 	}
 
 	// Set up the local operator dashboard (optional, disabled by

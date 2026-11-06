@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -12,12 +13,14 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/hjson/hjson-go/v4"
 
 	"github.com/yggdrasil-network/yggdrasil-go/src/admin"
 	"github.com/yggdrasil-network/yggdrasil-go/src/config"
 	"github.com/yggdrasil-network/yggdrasil-go/src/core"
+	"github.com/yggdrasil-network/yggdrasil-go/src/garlic"
 )
 
 // marshalConfig renders cfg the way -normaliseconf does. The admin socket
@@ -44,6 +47,7 @@ func marshalConfig(cfg *config.NodeConfig, asJSON bool) ([]byte, error) {
 type configPersister struct {
 	path       string
 	privateKey ed25519.PrivateKey // the key the node is running with
+	signingKey []byte             // the Garlic signing seed it is running with
 	mu         sync.Mutex
 }
 
@@ -64,6 +68,11 @@ func (p *configPersister) update(edit func(cfg *config.NodeConfig) bool) error {
 	// the identity the node is actually running with instead.
 	if cfg.PrivateKeyPath == "" {
 		cfg.PrivateKey = config.KeyBytes(p.privateKey)
+	}
+	// Likewise a file without a Garlic signing key would get a random one
+	// (and new site domains); write the one the node is using.
+	if cfg.GeneratedSigningKey && len(p.signingKey) > 0 {
+		cfg.Garlic.SigningPrivateKey = config.KeyBytes(p.signingKey)
 	}
 	if !edit(cfg) {
 		return nil
@@ -98,6 +107,105 @@ func (p *configPersister) update(edit func(cfg *config.NodeConfig) bool) error {
 	}
 	chownLike(tmp.Name(), info)
 	return os.Rename(tmp.Name(), p.path)
+}
+
+// backup copies the config file next to itself (same mode and owner) and
+// returns the copy's path.
+func (p *configPersister) backup(suffix string) (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	raw, err := os.ReadFile(p.path)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(p.path)
+	if err != nil {
+		return "", err
+	}
+	base := p.path + "." + suffix + "-" + time.Now().UTC().Format("20060102-150405")
+	// Never overwrite an earlier backup (two changes within one second).
+	for i := 1; ; i++ {
+		path := base
+		if i > 1 {
+			path = fmt.Sprintf("%s-%d", base, i)
+		}
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
+		if os.IsExist(err) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		if _, err := f.Write(raw); err != nil {
+			f.Close()
+			os.Remove(path)
+			return "", err
+		}
+		if err := f.Close(); err != nil {
+			os.Remove(path)
+			return "", err
+		}
+		chownLike(path, info)
+		return path, nil
+	}
+}
+
+// setupDomainCommands adds newGarlicDomains: a new signing key, and so new
+// domains for every site, only when explicitly asked for.
+func setupDomainCommands(a *admin.AdminSocket, p *configPersister, services []config.GarlicServiceConfig) {
+	_ = a.AddHandler("newGarlicDomains", "Give every site a new .yggg domain by replacing Garlic.SigningPrivateKey (the old domains stop working). Saved to the config, with a backup of the old one; takes effect after a restart. Needs confirm=yes", []string{"confirm"},
+		func(in json.RawMessage) (interface{}, error) {
+			var req struct {
+				Confirm string `json:"confirm"`
+			}
+			if err := json.Unmarshal(in, &req); err != nil {
+				return nil, err
+			}
+			if req.Confirm != "yes" {
+				return nil, fmt.Errorf("this replaces all of this node's .yggg domains for good - run it as: newGarlicDomains confirm=yes")
+			}
+			seed := make([]byte, ed25519.SeedSize)
+			if _, err := rand.Read(seed); err != nil {
+				return nil, err
+			}
+			backup, err := p.backup("before-new-domains")
+			if err != nil {
+				return nil, fmt.Errorf("could not back up %s, nothing changed: %w", p.path, err)
+			}
+			if err := p.update(func(cfg *config.NodeConfig) bool {
+				cfg.Garlic.SigningPrivateKey = seed
+				return true
+			}); err != nil {
+				return nil, fmt.Errorf("could not save the new key to %s, nothing changed: %w", p.path, err)
+			}
+			key := ed25519.NewKeyFromSeed(seed)
+			domains := map[string]string{"(default)": garlic.ComputeGID(key.Public().(ed25519.PublicKey), nil).Domain()}
+			for _, s := range services {
+				serviceID, err := hex.DecodeString(s.ServiceID)
+				if err != nil {
+					continue
+				}
+				siteKey, err := garlic.SiteSigningKey(key, s.Name, serviceID)
+				if err != nil {
+					continue
+				}
+				label := s.Name
+				if label == "" {
+					label = "(default)"
+				}
+				if s.ServiceID != "" {
+					label += " serviceId=" + s.ServiceID
+				}
+				domains[label] = garlic.ComputeGID(siteKey.Public().(ed25519.PublicKey), serviceID).Domain()
+			}
+			return map[string]interface{}{
+				"saved":      true,
+				"config":     p.path,
+				"backup":     backup,
+				"newDomains": domains,
+				"note":       "restart yggdrasil to switch to the new domains; to undo before that, copy the backup back over the config",
+			}, nil
+		})
 }
 
 // addPeerArgs is the request of the addPeer and removePeer handlers.

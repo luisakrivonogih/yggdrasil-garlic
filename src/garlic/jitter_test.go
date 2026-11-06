@@ -166,3 +166,45 @@ func TestJitterSchedulerHandlesConcurrentEnqueues(t *testing.T) {
 		}
 	}
 }
+
+// Packets to one destination must leave in the order they were enqueued,
+// whatever their random delays: reordering makes QUIC (site traffic) see
+// loss and collapse its sending rate.
+func TestJitterSchedulerKeepsOrderPerDestination(t *testing.T) {
+	var mu sync.Mutex
+	got := map[string][]byte{}
+	done := make(chan struct{}, 400)
+	s := newJitterScheduler(func(data []byte, addr net.Addr) error {
+		mu.Lock()
+		got[addr.String()] = append(got[addr.String()], data[0])
+		mu.Unlock()
+		done <- struct{}{}
+		return nil
+	}, 256, 16)
+	defer s.Stop()
+	for i := range 200 {
+		for _, dst := range []string{"alice", "bob"} {
+			d, err := randomJitter(0, 20*time.Millisecond)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !s.enqueue([]byte{byte(i)}, fakeAddr(dst), d) {
+				t.Fatal("queue full")
+			}
+		}
+	}
+	for range 400 {
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out")
+		}
+	}
+	for dst, seq := range got {
+		for i, b := range seq {
+			if b != byte(i) {
+				t.Fatalf("%s: packet %d sent in position %d", dst, b, i)
+			}
+		}
+	}
+}

@@ -17,6 +17,7 @@ package garlic
 import (
 	"crypto/rand"
 	"errors"
+	"hash/fnv"
 	"math/big"
 	"net"
 	"time"
@@ -31,37 +32,45 @@ type jitterJob struct {
 }
 
 // jitterScheduler delays calls to send by a caller-specified duration,
-// bounded by a fixed-capacity queue and a fixed worker pool - so a burst
-// of enqueues can never grow memory or goroutine count without limit.
+// bounded by fixed-capacity queues and a fixed number of goroutines - so a
+// burst of enqueues can never grow memory or goroutine count without limit.
+//
+// Packets to the same destination always go through the same lane and
+// leave in the order they were enqueued: each waits for its own delay and
+// for the packets ahead of it. Independent delays used to let packets of
+// one stream overtake each other, and QUIC (site traffic) takes such
+// reordering for loss and collapses its sending rate.
 type jitterScheduler struct {
-	send func(data []byte, addr net.Addr) error
-	jobs chan jitterJob
-	stop chan struct{}
+	send  func(data []byte, addr net.Addr) error
+	lanes []chan jitterJob
+	stop  chan struct{}
 }
 
-// newJitterScheduler starts a scheduler backed by workers goroutines
-// pulling from a queue of capacity queueSize. workers may be 0 (nothing
-// is ever sent; useful for testing enqueue's bounded-capacity behavior
-// in isolation).
+// newJitterScheduler starts a scheduler with workers lanes, each a
+// goroutine draining a FIFO queue of capacity queueSize. workers may be 0
+// (one lane that nothing drains; useful for testing enqueue's
+// bounded-capacity behavior in isolation).
 func newJitterScheduler(send func(data []byte, addr net.Addr) error, queueSize, workers int) *jitterScheduler {
-	s := &jitterScheduler{
-		send: send,
-		jobs: make(chan jitterJob, queueSize),
-		stop: make(chan struct{}),
+	s := &jitterScheduler{send: send, stop: make(chan struct{})}
+	for range max(workers, 1) {
+		s.lanes = append(s.lanes, make(chan jitterJob, max(queueSize, 1)))
 	}
-	for range workers {
-		go s.worker()
+	for i := range workers {
+		go s.worker(s.lanes[i])
 	}
 	return s
 }
 
-func (s *jitterScheduler) worker() {
+func (s *jitterScheduler) worker(lane chan jitterJob) {
+	timer := time.NewTimer(time.Hour)
+	timer.Stop()
 	for {
 		select {
-		case job := <-s.jobs:
+		case job := <-lane:
 			if d := time.Until(job.sendAt); d > 0 {
+				timer.Reset(d)
 				select {
-				case <-time.After(d):
+				case <-timer.C:
 				case <-s.stop:
 					return
 				}
@@ -73,18 +82,15 @@ func (s *jitterScheduler) worker() {
 	}
 }
 
-// enqueue schedules data to be sent to addr after delay and returns
-// immediately. It returns false, without sending, if the queue is at
-// capacity or Stop has already been called - never blocks and never
-// grows the queue unboundedly.
-//
-// Checking s.stop here (in addition to workers doing the same) closes a
-// race that would otherwise exist purely from closing the channel:
-// Go's select picks pseudo-randomly among ready cases, so a worker whose
-// select happens to run after both the queue has a job *and* s.stop has
-// been closed could still pick the job case. Rejecting new enqueues once
-// Stop has been observed here avoids that for the common sequential
-// pattern (Stop, then no further enqueue calls from that goroutine).
+func (s *jitterScheduler) lane(addr net.Addr) chan jitterJob {
+	if len(s.lanes) == 1 {
+		return s.lanes[0]
+	}
+	h := fnv.New32a()
+	h.Write([]byte(addr.String()))
+	return s.lanes[h.Sum32()%uint32(len(s.lanes))]
+}
+
 func (s *jitterScheduler) enqueue(data []byte, addr net.Addr, delay time.Duration) bool {
 	select {
 	case <-s.stop:
@@ -92,14 +98,13 @@ func (s *jitterScheduler) enqueue(data []byte, addr net.Addr, delay time.Duratio
 	default:
 	}
 	select {
-	case s.jobs <- jitterJob{data: data, addr: addr, sendAt: time.Now().Add(delay)}:
+	case s.lane(addr) <- jitterJob{data: data, addr: addr, sendAt: time.Now().Add(delay)}:
 		return true
 	default:
 		return false
 	}
 }
 
-// Stop halts all workers. Jobs still queued are dropped, not sent.
 func (s *jitterScheduler) Stop() {
 	close(s.stop)
 }

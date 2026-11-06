@@ -2,6 +2,8 @@ package config
 
 import (
 	"bytes"
+	"encoding/hex"
+	"strings"
 	"testing"
 )
 
@@ -35,10 +37,25 @@ func TestGarlicConfigDefaultsDisabled(t *testing.T) {
 	}
 }
 
-func TestGarlicConfigSigningPrivateKeyDefaultsEmpty(t *testing.T) {
+// Site domains derive from Garlic.SigningPrivateKey. A config without one
+// gets one while being read and says so, so the writer (normaliseconf, the
+// daemon) can save it once; a configured key is kept as it is.
+func TestGarlicSigningKeyGeneratedOnceAndKept(t *testing.T) {
 	cfg := GenerateConfig()
-	if len(cfg.Garlic.SigningPrivateKey) != 0 {
-		t.Error("Garlic.SigningPrivateKey is non-empty by default, want empty (generated fresh at startup until configured)")
+	cfg.Garlic.SigningPrivateKey = nil
+	if err := cfg.UnmarshalHJSON([]byte("{}")); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Garlic.SigningPrivateKey) != 32 || !cfg.GeneratedSigningKey {
+		t.Fatalf("missing signing key not generated and flagged (len %d, flagged %v)", len(cfg.Garlic.SigningPrivateKey), cfg.GeneratedSigningKey)
+	}
+	key := hex.EncodeToString(cfg.Garlic.SigningPrivateKey)
+	again := GenerateConfig()
+	if _, err := again.ReadFrom(strings.NewReader(`{ Garlic: { SigningPrivateKey: "` + key + `" } }`)); err != nil {
+		t.Fatal(err)
+	}
+	if hex.EncodeToString(again.Garlic.SigningPrivateKey) != key || again.GeneratedSigningKey {
+		t.Fatal("a configured signing key was replaced")
 	}
 }
 
