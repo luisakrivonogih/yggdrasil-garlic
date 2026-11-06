@@ -40,6 +40,10 @@
 #                     added to Garlic.TrustedPeers.
 #   PEERS             comma-separated Yggdrasil peer URIs (tls://host:port),
 #                     added to Peers.
+#   SITE_ADDR         host:port of a local HTTP server to publish as this
+#                     node's .yggg site (e.g. 127.0.0.1:8090). Sites are
+#                     hosted by hidden nodes, so this also switches the node
+#                     to client mode: it stops being a public relay.
 #
 # Reinstalling never resets the config: keys, Peers, TrustedPeers and the
 # Garlic mode are kept, the lists above are only added to. Peers added at
@@ -80,6 +84,14 @@ for _k in $(echo "$GARLIC_TRUSTED_PEERS" | tr ',' ' '); do
   printf '%s' "$_k" | grep -Eq '^[0-9a-fA-F]{64}$' ||
     die "invalid key in GARLIC_TRUSTED_PEERS: $_k (need the 64-hex \"Public key\" from yggdrasilctl getSelf)"
 done
+SITE_ADDR=${SITE_ADDR:-}
+if [ -n "$SITE_ADDR" ]; then
+  printf '%s' "$SITE_ADDR" | LC_ALL=C grep -Eq '^([A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\]):[0-9]{1,5}$' ||
+    die "invalid SITE_ADDR: $SITE_ADDR (example: 127.0.0.1:8090)"
+  [ "$GARLIC_MODE" != relay ] ||
+    die "sites are hosted by hidden nodes - drop GARLIC_MODE=relay (relays refuse to host sites, see docs/garlic-quickstart.md)"
+  GARLIC_MODE=client
+fi
 
 # ---- 0. macOS: delegate to scripts/setup.sh (launchd, no deb/rpm) ----
 if [ "$(uname -s)" = "Darwin" ]; then
@@ -457,6 +469,7 @@ update_config() {
        --argjson dash "$([ "$_dash" = "1" ] && echo true || echo false)" \
        --arg trusted "$GARLIC_TRUSTED_PEERS" \
        --arg peers "$PEERS" \
+       --arg site "$SITE_ADDR" \
        --arg mode "$_mode" \
        'def merge($list; $add): (($list // []) + ($add | split(",") | map(gsub("^ +| +$"; "")) | map(select(. != "")))) as $all
           | reduce $all[] as $x ([]; if index([$x]) then . else . + [$x] end);
@@ -464,10 +477,14 @@ update_config() {
         | .Garlic.Mode = (if $mode != "" then $mode else .Garlic.Mode end)
         | .Dashboard.Enabled = (if $dash then true else .Dashboard.Enabled end)
         | .Garlic.TrustedPeers = merge((.Garlic.TrustedPeers // []) | map(ascii_downcase); $trusted | ascii_downcase)
-        | .Peers = merge(.Peers; $peers)' \
+        | .Peers = merge(.Peers; $peers)
+        | .Garlic.Services = (if $site == "" then .Garlic.Services
+            else ((.Garlic.Services // []) as $s
+              | if any($s[]; .ServiceID == "") then $s | map(if .ServiceID == "" then .LocalAddr = $site else . end)
+                else $s + [{ServiceID: "", LocalAddr: $site}] end) end)' \
        "$TMP_JSON" > "$TMP_JSON.new" && EDITED=1
   elif command -v python3 >/dev/null 2>&1; then
-    ENABLE_GARLIC="$ENABLE_GARLIC" ENABLE_DASHBOARD="$_dash" GARLIC_TRUSTED_PEERS="$GARLIC_TRUSTED_PEERS" PEERS="$PEERS" GARLIC_MODE="$_mode" python3 - "$TMP_JSON" > "$TMP_JSON.new" <<'PY' && EDITED=1
+    ENABLE_GARLIC="$ENABLE_GARLIC" ENABLE_DASHBOARD="$_dash" GARLIC_TRUSTED_PEERS="$GARLIC_TRUSTED_PEERS" PEERS="$PEERS" SITE_ADDR="$SITE_ADDR" GARLIC_MODE="$_mode" python3 - "$TMP_JSON" > "$TMP_JSON.new" <<'PY' && EDITED=1
 import json, os, sys
 with open(sys.argv[1]) as f:
     cfg = json.load(f)
@@ -486,6 +503,16 @@ if os.environ.get("GARLIC_MODE"):
     garlic["Mode"] = os.environ["GARLIC_MODE"]
 garlic["TrustedPeers"] = merge([k.lower() for k in garlic.get("TrustedPeers") or []], os.environ.get("GARLIC_TRUSTED_PEERS", "").lower())
 cfg["Peers"] = merge(cfg.get("Peers"), os.environ.get("PEERS", ""))
+site = os.environ.get("SITE_ADDR", "")
+if site:
+    services = garlic.get("Services") or []
+    for s in services:
+        if not s.get("ServiceID"):
+            s["LocalAddr"] = site
+            break
+    else:
+        services.append({"ServiceID": "", "LocalAddr": site})
+    garlic["Services"] = services
 json.dump(cfg, sys.stdout, indent=2)
 PY
   fi
@@ -507,7 +534,7 @@ PY
     log "Neither jq nor python3 found - enable manually: set \"Garlic\": { \"Enabled\": true } and/or \"Dashboard\": { \"Enabled\": true } (and \"Mode\": \"relay\", \"TrustedPeers\": [...]) in /etc/yggdrasil/yggdrasil.conf, then run 'systemctl restart yggdrasil'"
   fi
 }
-if [ "$ENABLE_GARLIC" = "1" ] || [ -n "$GARLIC_TRUSTED_PEERS" ] || [ -n "$PEERS" ] || [ -n "$GARLIC_MODE" ]; then
+if [ "$ENABLE_GARLIC" = "1" ] || [ -n "$GARLIC_TRUSTED_PEERS" ] || [ -n "$PEERS" ] || [ -n "$GARLIC_MODE" ] || [ -n "$SITE_ADDR" ]; then
   update_config 0
 fi
 
@@ -554,6 +581,29 @@ echo "--- Garlic identity (present only if Garlic started successfully) ---"
 echo
 echo "--- Garlic peers ---"
 "$YGGCTL" getGarlicPeers || true
+if [ -n "$SITE_ADDR" ]; then
+  echo
+  echo "--- Site ---"
+  SITE_DOMAIN=$("$YGGCTL" getGarlicDomain 2>/dev/null | sed -n 's/.*"domain": *"\([^"]*\)".*/\1/p')
+  echo "address:      http://$SITE_DOMAIN/"
+  if curl -s -o /dev/null --max-time 3 "http://$SITE_ADDR/"; then
+    echo "local server: $SITE_ADDR answers"
+  else
+    echo "local server: nothing answers at $SITE_ADDR yet - start your web server there (e.g. python3 -m http.server ${SITE_ADDR##*:} --bind ${SITE_ADDR%:*})"
+  fi
+  echo "This node now runs in client (hidden) mode: it hosts the site and is no longer a public relay."
+  echo "Nodes that had it as their only trusted peer need another one (addGarlicPeer)."
+  printf "publishing (up to 60 s)"
+  for _i in $(seq 1 30); do
+    if "$YGGCTL" getGarlicServices 2>/dev/null | grep -q '"published": *true'; then break; fi
+    printf "."
+    sleep 2
+  done
+  echo
+  "$YGGCTL" getGarlicServices || true
+  echo "Open it from another Garlic node through its browser proxy 127.0.0.1:4444:"
+  echo "  curl --proxy http://127.0.0.1:4444 http://$SITE_DOMAIN/"
+fi
 if [ "$ENABLE_DASHBOARD" = "1" ]; then
   echo
   echo "--- Dashboard ---"

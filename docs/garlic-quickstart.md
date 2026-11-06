@@ -32,7 +32,8 @@ powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 install -Peers "tls:/
 Переменные установщика: `PEERS` (обычные пиры Yggdrasil), `TRUSTED` (доверенные
 Garlic-relay), `MODE` (`client`/`relay`), `SITE_ADDR` (локальный HTTP-сервер для сайта).
 На Linux-сервере: `PEERS`, `GARLIC_TRUSTED_PEERS`, `GARLIC_MODE` (по умолчанию
-остаётся прежний режим; `relay` при первой установке).
+остаётся прежний режим; `relay` при первой установке), `SITE_ADDR` (публикует сайт и
+переводит узел в `client`: сайт держит только скрытый узел).
 Скрипт сам делает `git pull`, переносит старый конфиг на новые поля и проверяет
 итоговый конфиг перед перезапуском (при ошибке остаётся прежний).
 
