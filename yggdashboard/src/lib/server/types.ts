@@ -120,6 +120,37 @@ export interface GarlicKnownPeer {
   selfVerified: boolean;
 }
 
+/** One relay from getGarlicPeers, with what this node learned about it. */
+export interface GarlicRelay {
+  key: string;
+  selfVerified: boolean;
+  onionKeyExpires: string;
+  /** Decaying count of recent failures through this relay (0 = none). */
+  failScore: number;
+  successes: number;
+  failures: number;
+  /** Typical round trip of paths through this relay, if measured. */
+  rttMillis?: number;
+}
+
+/** getGarlicPeers: trust and relay state. */
+export interface GarlicNetwork {
+  mode: string;
+  trusted: string[];
+  guard?: string;
+  relays: GarlicRelay[];
+}
+
+/** One hosted site from getGarlicServices. */
+export interface GarlicSite {
+  name?: string;
+  domain: string;
+  introPoints: number;
+  published: boolean;
+  lastPublished?: string;
+  error?: string;
+}
+
 export interface GarlicAutoPoolEntry {
   circuitId: string;
   /** RFC3339. */
@@ -140,6 +171,8 @@ export interface GarlicSnapshot {
   circuits: GarlicCircuits;
   knownPeers: GarlicKnownPeer[];
   autoPool: GarlicAutoPoolEntry[];
+  network: GarlicNetwork | null;
+  sites: GarlicSite[];
 }
 
 /** One historical sample of the live-updating metrics (Task 13). */
@@ -200,7 +233,9 @@ export const EMPTY_GARLIC: GarlicSnapshot = {
   stats: EMPTY_GARLIC_STATS,
   circuits: { originated: [], relayed: [] },
   knownPeers: [],
-  autoPool: []
+  autoPool: [],
+  network: null,
+  sites: []
 };
 
 export const EMPTY_SNAPSHOT: Snapshot = {

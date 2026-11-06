@@ -293,10 +293,10 @@ type Garlic struct {
 	health *relayHealth // relay failures and latency learned from circuits
 
 	trustMu    sync.Mutex
-	trusted    map[string][]byte    // configured and runtime-added trusted node keys
-	guard      []byte               // current trusted first hop
-	savedGuard []byte               // the guard last reported to OnGuardChange
-	guardSeen  map[string]time.Time // when each trusted peer last answered directly
+	trusted    map[string][]byte      // configured and runtime-added trusted node keys
+	guard      []byte                 // current trusted first hop
+	savedGuard []byte                 // the guard last reported to OnGuardChange
+	guardState map[string]*guardCheck // liveness of each trusted peer
 
 	mu              sync.Mutex
 	capabilityCache map[string]*cachedRelay

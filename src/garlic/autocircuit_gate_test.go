@@ -141,7 +141,7 @@ func TestAutoCreateCircuitSkipsTrustedGuardMissingGarlicV3(t *testing.T) {
 	// Both trusted peers answered just now, so the cached relay information
 	// (not a fresh request) decides whether a guard is usable.
 	gOrigin.trustMu.Lock()
-	gOrigin.guardSeen = map[string]time.Time{string(nodes[1].PublicKey()): time.Now(), string(nodes[2].PublicKey()): time.Now()}
+	gOrigin.guardState = map[string]*guardCheck{string(nodes[1].PublicKey()): {seen: time.Now()}, string(nodes[2].PublicKey()): {seen: time.Now()}}
 	gOrigin.trustMu.Unlock()
 	for range 8 {
 		id, err := gOrigin.AutoCreateCircuit(1)
@@ -173,8 +173,28 @@ func TestGuardThatStopsAnsweringIsReplaced(t *testing.T) {
 		}
 	}
 	gOrigin.trustMu.Lock()
-	gOrigin.guardSeen[string(first)] = time.Now().Add(-2 * guardRecheck)
+	gOrigin.guardState[string(first)].seen = time.Now().Add(-2 * guardRecheck)
 	gOrigin.trustMu.Unlock()
+	// The next circuit still goes through the cached guard while a
+	// background liveness check runs; once that check goes unanswered the
+	// guard is skipped.
+	if id, err := gOrigin.AutoCreateCircuit(1); err == nil {
+		gOrigin.CloseCircuit(id)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		gOrigin.trustMu.Lock()
+		st := gOrigin.guardState[string(first)]
+		failed := !st.checking && !st.failed.IsZero()
+		gOrigin.trustMu.Unlock()
+		if failed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("liveness check of the silent guard never completed")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 
 	id, err = gOrigin.AutoCreateCircuit(1)
 	if err != nil {

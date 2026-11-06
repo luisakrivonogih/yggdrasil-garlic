@@ -14,6 +14,8 @@ import {
   type GarlicCircuits,
   type GarlicKnownPeer,
   type GarlicAutoPoolEntry,
+  type GarlicNetwork,
+  type GarlicSite,
   type HistorySample
 } from './types';
 
@@ -188,11 +190,13 @@ export class Poller {
       return EMPTY_GARLIC;
     }
 
-    const [identityRes, circuitsRes, knownPeersRes, autoPoolRes] = await Promise.allSettled([
+    const [identityRes, circuitsRes, knownPeersRes, autoPoolRes, networkRes, sitesRes] = await Promise.allSettled([
       this.client.request<GarlicIdentity>('getGarlicIdentity'),
       this.client.request<GarlicCircuits>('getGarlicCircuits'),
       this.client.request<{ peers: GarlicKnownPeer[] }>('getGarlicKnownPeers'),
-      this.client.request<{ pool: GarlicAutoPoolEntry[] }>('getGarlicAutoPool')
+      this.client.request<{ pool: GarlicAutoPoolEntry[] }>('getGarlicAutoPool'),
+      this.client.request<GarlicNetwork>('getGarlicPeers'),
+      this.client.request<{ services: GarlicSite[] }>('getGarlicServices')
     ]);
 
     return {
@@ -201,7 +205,9 @@ export class Poller {
       stats,
       circuits: circuitsRes.status === 'fulfilled' ? circuitsRes.value : this.latest.garlic.circuits,
       knownPeers: knownPeersRes.status === 'fulfilled' ? knownPeersRes.value.peers : this.latest.garlic.knownPeers,
-      autoPool: autoPoolRes.status === 'fulfilled' ? autoPoolRes.value.pool : this.latest.garlic.autoPool
+      autoPool: autoPoolRes.status === 'fulfilled' ? autoPoolRes.value.pool : this.latest.garlic.autoPool,
+      network: networkRes.status === 'fulfilled' && networkRes.value ? networkRes.value : this.latest.garlic.network,
+      sites: sitesRes.status === 'fulfilled' && sitesRes.value ? (sitesRes.value.services ?? []) : this.latest.garlic.sites
     };
   }
 }

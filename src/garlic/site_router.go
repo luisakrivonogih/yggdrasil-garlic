@@ -61,6 +61,7 @@ type siteRouter struct {
 	clientFlows map[CircuitID]CircuitID
 	hosts       map[GID]*HostedService
 	clients     map[CircuitID]*sitePacketConn
+	pools       map[GID]*sitePool
 	acks        map[CircuitID]chan bool
 	queue       chan siteEvent
 	ctx         context.Context
@@ -70,7 +71,7 @@ type siteRouter struct {
 
 func newSiteRouter(g *Garlic) *siteRouter {
 	ctx, cancel := context.WithCancel(context.Background())
-	r := &siteRouter{g: g, ctx: ctx, cancel: cancel, bindings: make(map[GID]siteBinding), flows: make(map[CircuitID]*siteFlow), clientFlows: make(map[CircuitID]CircuitID), hosts: make(map[GID]*HostedService), clients: make(map[CircuitID]*sitePacketConn), acks: make(map[CircuitID]chan bool), queue: make(chan siteEvent, 256)}
+	r := &siteRouter{g: g, ctx: ctx, cancel: cancel, bindings: make(map[GID]siteBinding), flows: make(map[CircuitID]*siteFlow), clientFlows: make(map[CircuitID]CircuitID), hosts: make(map[GID]*HostedService), clients: make(map[CircuitID]*sitePacketConn), pools: make(map[GID]*sitePool), acks: make(map[CircuitID]chan bool), queue: make(chan siteEvent, 256)}
 	for range 4 {
 		r.wg.Add(1)
 		go func() {
@@ -163,8 +164,11 @@ func (r *siteRouter) handle(e siteEvent) {
 			r.mu.Lock()
 			host := r.hosts[gid]
 			r.mu.Unlock()
-			if host != nil && host.route.accepts(e.circuit) {
-				host.pc.deliver(id, body[49:])
+			if host != nil {
+				if route := host.pc.hostRoutes.accept(e.circuit); route != nil {
+					host.pc.hostRoutes.note(id, route)
+					host.pc.deliver(id, body[49:])
+				}
 			}
 		}
 		return
@@ -329,7 +333,14 @@ func (r *siteRouter) close() {
 	for _, pc := range r.clients {
 		clients = append(clients, pc)
 	}
+	pools := make([]*sitePool, 0, len(r.pools))
+	for _, p := range r.pools {
+		pools = append(pools, p)
+	}
 	r.mu.Unlock()
+	for _, p := range pools {
+		p.closeAll()
+	}
 	for _, h := range hosts {
 		h.Close()
 	}

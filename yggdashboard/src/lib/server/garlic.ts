@@ -30,6 +30,30 @@ export function computeGarlic(snap: Snapshot) {
       createdAt: c.createdAt,
       hops: c.hops
     })),
+    network: snap.garlic.network
+      ? {
+          mode: snap.garlic.network.mode,
+          guard: snap.garlic.network.guard ?? null,
+          trusted: [...(snap.garlic.network.trusted ?? [])],
+          relays: (snap.garlic.network.relays ?? []).map((r) => ({
+            key: r.key,
+            selfVerified: r.selfVerified,
+            onionKeyExpires: r.onionKeyExpires,
+            failScore: r.failScore ?? 0,
+            successes: r.successes ?? 0,
+            failures: r.failures ?? 0,
+            rttMillis: r.rttMillis ?? null
+          }))
+        }
+      : null,
+    sites: (snap.garlic.sites ?? []).map((s) => ({
+      name: s.name ?? '',
+      domain: s.domain,
+      introPoints: s.introPoints ?? 0,
+      published: s.published,
+      lastPublished: s.lastPublished ?? null,
+      error: s.error ?? null
+    })),
     polledAt: snap.polledAt
   };
 }

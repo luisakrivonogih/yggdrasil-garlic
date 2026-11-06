@@ -6,6 +6,7 @@ import (
 	mrand "math/rand/v2"
 	"net"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -82,7 +83,7 @@ func (r *siteRoute) send(body []byte, host bool) error {
 		r.g.sites.mu.Lock()
 		var h *HostedService
 		for _, candidate := range r.g.sites.hosts {
-			if candidate.route == r {
+			if slices.Contains(candidate.routes, r) {
 				h = candidate
 				break
 			}
@@ -138,6 +139,7 @@ type sitePacketConn struct {
 	readDeadline, writeDeadline time.Time
 	wake                        chan struct{}
 	lastWrite                   atomic.Int64 // UnixNano of the last real packet sent
+	hostRoutes                  *hostRouting // host only: one route per intro point
 }
 
 // Cover traffic on site circuits: while a connection sends nothing real,
@@ -170,7 +172,9 @@ func (p *sitePacketConn) coverLoop() {
 		if _, err := rand.Read(body[1:]); err != nil {
 			continue
 		}
-		p.route.sendCover(body)
+		if route := p.coverRoute(); route != nil {
+			route.sendCover(body)
+		}
 	}
 }
 
@@ -180,16 +184,23 @@ func newSitePacketConn(g *Garlic, gid GID, host bool, route *siteRoute) (*sitePa
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(g.sites.ctx)
-	route.ctx = ctx
+	if route != nil {
+		route.ctx = ctx
+	}
 	p := &sitePacketConn{g: g, gid: gid, id: id, host: host, route: route, in: make(chan sitePacket, 128), ctx: ctx, cancel: cancel, wake: make(chan struct{})}
 	if _, err := rand.Read(p.secret[:]); err != nil {
 		cancel()
 		return nil, err
 	}
-	if g.cfg.CoverTrafficEnabled {
+	return p, nil
+}
+
+// startCover starts cover traffic for p (see coverLoop), once p is fully
+// set up.
+func (p *sitePacketConn) startCover() {
+	if p.g.cfg.CoverTrafficEnabled {
 		go p.coverLoop()
 	}
-	return p, nil
 }
 
 func (p *sitePacketConn) deliver(id CircuitID, body []byte) {
@@ -275,10 +286,87 @@ func (p *sitePacketConn) WriteTo(body []byte, addr net.Addr) (int, error) {
 		packet = append(packet, p.secret[:]...)
 	}
 	packet = append(packet, body...)
-	if err := p.route.send(packet, p.host); err != nil {
+	route := p.route
+	if p.host {
+		// Answer over the relay the client's flow came in through.
+		if route = p.hostRoutes.routeFor(peer); route == nil {
+			return len(body), nil // no route yet: QUIC retransmits
+		}
+	}
+	if err := route.send(packet, p.host); err != nil {
 		return 0, err
 	}
 	return len(body), nil
+}
+
+// hostRouting maps a hosted site's client flows to the intro-point route
+// they arrived on, so answers go back the same way.
+type hostRouting struct {
+	mu     sync.Mutex
+	routes []*siteRoute
+	flows  map[CircuitID]flowRoute
+}
+
+type flowRoute struct {
+	route *siteRoute
+	seen  time.Time
+}
+
+// accept returns the route whose current circuit is circuit, if any.
+func (h *hostRouting) accept(circuit CircuitID) *siteRoute {
+	for _, r := range h.routes {
+		if r.accepts(circuit) {
+			return r
+		}
+	}
+	return nil
+}
+
+func (h *hostRouting) note(peer CircuitID, r *siteRoute) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	now := time.Now()
+	if len(h.flows) >= maxSiteFlows {
+		for k, f := range h.flows {
+			if now.Sub(f.seen) > 2*time.Minute {
+				delete(h.flows, k)
+			}
+		}
+	}
+	h.flows[peer] = flowRoute{r, now}
+}
+
+func (h *hostRouting) routeFor(peer CircuitID) *siteRoute {
+	h.mu.Lock()
+	f, ok := h.flows[peer]
+	h.mu.Unlock()
+	if ok {
+		return f.route
+	}
+	return h.anyRoute()
+}
+
+// anyRoute returns a random route that has a circuit.
+func (h *hostRouting) anyRoute() *siteRoute {
+	var live []*siteRoute
+	for _, r := range h.routes {
+		if r.current.Load() != nil {
+			live = append(live, r)
+		}
+	}
+	if len(live) == 0 {
+		return nil
+	}
+	return live[mrand.IntN(len(live))]
+}
+
+// coverRoute is the route cover traffic goes out on: a random intro-point
+// route for a host, the connection's own route for a client.
+func (p *sitePacketConn) coverRoute() *siteRoute {
+	if p.host {
+		return p.hostRoutes.anyRoute()
+	}
+	return p.route
 }
 
 func (p *sitePacketConn) Close() error {

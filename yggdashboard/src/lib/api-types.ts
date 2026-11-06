@@ -120,6 +120,28 @@ export interface GarlicResponse {
   };
   knownPeers: Array<{ nodeKey: string; garlicPublicKey: string; lastSeen: string; selfVerified: boolean }>;
   autoPool: GarlicAutoPoolEntry[];
+  network: {
+    mode: string;
+    guard: string | null;
+    trusted: string[];
+    relays: Array<{
+      key: string;
+      selfVerified: boolean;
+      onionKeyExpires: string;
+      failScore: number;
+      successes: number;
+      failures: number;
+      rttMillis: number | null;
+    }>;
+  } | null;
+  sites: Array<{
+    name: string;
+    domain: string;
+    introPoints: number;
+    published: boolean;
+    lastPublished: string | null;
+    error: string | null;
+  }>;
   polledAt: string;
 }
 

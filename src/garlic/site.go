@@ -42,7 +42,8 @@ type HostedService struct {
 	gid                  GID
 	serviceID            []byte
 	pc                   *sitePacketConn
-	route                *siteRoute
+	routes               []*siteRoute // one per intro point (siteIntroPoints)
+	introPoints          int          // relays in the last published descriptor
 	transport            *quic.Transport
 	listener             *quic.Listener
 	ctx                  context.Context
@@ -64,7 +65,7 @@ type HostedService struct {
 // application needs it, so the larger maximum costs memory only while a
 // reader falls behind.
 func siteQUICConfig() *quic.Config {
-	return &quic.Config{HandshakeIdleTimeout: 15 * time.Second, MaxIdleTimeout: 60 * time.Second, KeepAlivePeriod: 15 * time.Second, MaxIncomingStreams: 4, MaxIncomingUniStreams: -1, InitialPacketSize: 1400, DisablePathMTUDiscovery: true, MaxStreamReceiveWindow: 4 << 20, MaxConnectionReceiveWindow: 8 << 20}
+	return &quic.Config{HandshakeIdleTimeout: 15 * time.Second, MaxIdleTimeout: 60 * time.Second, KeepAlivePeriod: 15 * time.Second, MaxIncomingStreams: 32, MaxIncomingUniStreams: -1, InitialPacketSize: 1400, DisablePathMTUDiscovery: true, MaxStreamReceiveWindow: 4 << 20, MaxConnectionReceiveWindow: 8 << 20}
 }
 
 // siteCertificate is the site's self-signed TLS certificate. Clients check
@@ -118,8 +119,15 @@ func (g *Garlic) StartService(cfg ServiceConfig) (*HostedService, error) {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(g.sites.ctx)
-	h := &HostedService{g: g, cfg: cfg, key: key, gid: gid, serviceID: serviceID, ctx: ctx, cancel: cancel, ready: make(chan struct{}), wake: make(chan struct{}, 1), connections: make(chan struct{}, 64), streams: make(chan struct{}, 128), route: &siteRoute{g: g}}
-	h.pc, err = newSitePacketConn(g, gid, true, h.route)
+	h := &HostedService{g: g, cfg: cfg, key: key, gid: gid, serviceID: serviceID, ctx: ctx, cancel: cancel, ready: make(chan struct{}), wake: make(chan struct{}, 1), connections: make(chan struct{}, 64), streams: make(chan struct{}, 128)}
+	for range siteIntroPoints {
+		h.routes = append(h.routes, &siteRoute{g: g})
+	}
+	h.pc, err = newSitePacketConn(g, gid, true, nil)
+	if err == nil {
+		h.pc.hostRoutes = &hostRouting{routes: h.routes, flows: make(map[CircuitID]flowRoute)}
+		h.pc.startCover()
+	}
 	if err != nil {
 		cancel()
 		return nil, err
@@ -177,7 +185,7 @@ func (h *HostedService) maintain() {
 		if err == nil {
 			h.readyOnce.Do(func() { close(h.ready) })
 		}
-		delay := siteJitter(max(250*time.Millisecond, min(45*time.Second, h.route.rotationInterval()/2)))
+		delay := siteJitter(max(250*time.Millisecond, min(45*time.Second, h.routes[0].rotationInterval()/2)))
 		if err != nil {
 			delay = siteJitter(2 * time.Second)
 		}
@@ -193,97 +201,169 @@ func (h *HostedService) maintain() {
 	}
 }
 
+// siteIntroPoints is how many different site relays a host keeps: each
+// slot has its own circuit, and the descriptor lists all of them, so
+// clients reach the site over several independent routes.
+const siteIntroPoints = 2
+
 func (h *HostedService) refresh() error {
 	ctx, cancel := context.WithTimeout(h.ctx, 20*time.Second)
 	defer cancel()
-	h.route.mu.Lock()
-	defer h.route.mu.Unlock()
 	select {
 	case <-h.ctx.Done():
 		return h.ctx.Err()
 	default:
 	}
-	if len(h.route.gateway) == 0 {
-		// Candidate relays come only from verified relay information held
-		// locally; none of them is contacted before the circuit is built.
-		// The current guard is never used as the site's relay: it already
-		// knows this node's key, and as relay it would learn the site too.
-		guard := h.g.CurrentGuard()
-		var peers []DiscoveredPeer
-		for _, p := range h.g.KnownPeers() {
-			if bytes.Equal(p.NodeKey, guard) {
-				continue
-			}
-			if c, ok := h.g.knownRelay(p.NodeKey); ok && needSites(c) {
-				peers = append(peers, p)
-			}
+	// 1. Every slot gets a working circuit to its own relay. Route locks
+	// are held only while a slot's circuit changes, never during the
+	// registration and directory round trips below, so site traffic keeps
+	// flowing while the site is republished.
+	var slotErr error
+	for _, r := range h.routes {
+		if err := h.ensureSlot(ctx, r); err != nil {
+			slotErr = err
 		}
-		// Independent random order per service, weighted towards relays
-		// that have been working (recent failures push a relay back).
-		weights := make([][]byte, len(peers))
-		for i, p := range peers {
-			weights[i] = p.NodeKey
-		}
-		ordered := make([]DiscoveredPeer, 0, len(peers))
-		for _, i := range weightedOrder(h.g.health.weights(weights)) {
-			ordered = append(ordered, peers[i])
-		}
-		peers = ordered
-		var circuitErr error
-		for _, p := range peers {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			id, err := h.g.createSiteCircuitContext(ctx, p.NodeKey)
-			if err != nil {
-				circuitErr = err
-				continue
-			}
-			h.route.gateway = bytes.Clone(p.NodeKey)
-			h.route.circuit = id
-			h.route.current.Store(&id)
-			h.route.created = time.Now()
-			break
-		}
-		if len(h.route.gateway) == 0 {
-			if len(h.g.trustedPeerKeys()) == 0 {
-				return ErrNoTrustedPeers
-			}
-			if len(peers) == 0 {
-				return errors.New("garlic: no usable relay known yet besides the trusted guard (waiting for gossip from trusted peers)")
-			}
-			if circuitErr != nil {
-				return fmt.Errorf("garlic: could not build a circuit to any site relay: %w", circuitErr)
-			}
-			return ErrDirectoryUnavailable
-		}
-	} else if err := h.route.ensureLocked(ctx); err != nil {
-		return err
 	}
+	type slot struct {
+		route   *siteRoute
+		gateway []byte
+		circuit CircuitID
+		point   IntroPoint
+	}
+	var live []slot
+	for _, r := range h.routes {
+		r.mu.Lock()
+		gateway, circuit := bytes.Clone(r.gateway), r.circuit
+		r.mu.Unlock()
+		if len(gateway) == 0 || circuit == (CircuitID{}) {
+			continue
+		}
+		relayInfo := h.g.relayInfoRaw(gateway)
+		if relayInfo == nil {
+			h.resetSlot(r, circuit)
+			slotErr = ErrUnknownRelay
+			continue
+		}
+		live = append(live, slot{r, gateway, circuit, IntroPoint{NodeKey: gateway, RelayInfo: relayInfo}})
+	}
+	if len(live) == 0 {
+		return slotErr
+	}
+	// 2. One descriptor listing every relay; each relay registers it.
 	now := uint64(time.Now().Unix())
-	relayInfo := h.g.relayInfoRaw(h.route.gateway)
-	if relayInfo == nil {
-		h.g.CloseCircuit(h.route.circuit)
-		h.route.circuit = CircuitID{}
-		h.route.current.Store(nil)
-		h.route.gateway = nil
-		return ErrUnknownRelay
+	pub := h.key.Public().(ed25519.PublicKey)
+	points := make([]IntroPoint, len(live))
+	for i, l := range live {
+		points[i] = l.point
 	}
-	d, err := SignServiceDescriptor(h.key.Public().(ed25519.PublicKey), h.key, h.serviceID, []IntroPoint{{NodeKey: h.route.gateway, RelayInfo: relayInfo}}, now, now+180)
+	d, err := SignServiceDescriptor(pub, h.key, h.serviceID, points, now, now+180)
 	if err != nil {
 		return err
 	}
-	if err := h.g.sites.register(ctx, h.route.circuit, h.route.gateway, d, h.key); err != nil {
-		h.g.CloseCircuit(h.route.circuit)
-		h.route.circuit = CircuitID{}
-		h.route.current.Store(nil)
-		h.route.gateway = nil
-		return err
+	var registered []IntroPoint
+	var regErr error
+	for _, l := range live {
+		if err := h.g.sites.register(ctx, l.circuit, l.gateway, d, h.key); err != nil {
+			h.resetSlot(l.route, l.circuit)
+			regErr = err
+			continue
+		}
+		registered = append(registered, l.point)
 	}
+	if len(registered) == 0 {
+		return regErr
+	}
+	if len(registered) < len(points) {
+		// Publish only the relays that accepted the registration.
+		if d, err = SignServiceDescriptor(pub, h.key, h.serviceID, registered, now, now+180); err != nil {
+			return err
+		}
+	}
+	h.mu.Lock()
+	h.introPoints = len(registered)
+	h.mu.Unlock()
 	// Directory RPCs construct independent circuits, avoiding publication
-	// over the service's data circuit. The fixed relay remains stable while
-	// that circuit rotates, so live QUIC streams retain their endpoint.
+	// over the service's data circuits. The relays remain stable while
+	// their circuits rotate, so live QUIC streams retain their endpoints.
 	return h.g.rendezvous.Publish(h.gid, d)
+}
+
+// ensureSlot gives route a working circuit: to a relay of its own if it has
+// none yet (never the guard, which already knows this node, and never
+// another slot's relay), otherwise by rotating its circuit when due.
+func (h *HostedService) ensureSlot(ctx context.Context, route *siteRoute) error {
+	taken := map[string]bool{}
+	if guard := h.g.CurrentGuard(); guard != nil {
+		taken[string(guard)] = true
+	}
+	for _, other := range h.routes {
+		if other == route {
+			continue
+		}
+		other.mu.Lock()
+		if len(other.gateway) > 0 {
+			taken[string(other.gateway)] = true
+		}
+		other.mu.Unlock()
+	}
+	route.mu.Lock()
+	defer route.mu.Unlock()
+	if len(route.gateway) > 0 {
+		return route.ensureLocked(ctx)
+	}
+	// Candidate relays come only from verified relay information held
+	// locally; none of them is contacted before the circuit is built. The
+	// order is random per slot, weighted towards relays that have been
+	// working (recent failures push a relay back).
+	var keys [][]byte
+	for _, p := range h.g.KnownPeers() {
+		if taken[string(p.NodeKey)] {
+			continue
+		}
+		if c, ok := h.g.knownRelay(p.NodeKey); ok && needSites(c) {
+			keys = append(keys, p.NodeKey)
+		}
+	}
+	var circuitErr error
+	for _, key := range h.g.orderByHealth(keys) {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		id, err := h.g.createSiteCircuitContext(ctx, key)
+		if err != nil {
+			circuitErr = err
+			continue
+		}
+		route.gateway = bytes.Clone(key)
+		route.circuit = id
+		route.current.Store(&id)
+		route.created = time.Now()
+		return nil
+	}
+	switch {
+	case len(h.g.trustedPeerKeys()) == 0:
+		return ErrNoTrustedPeers
+	case len(keys) == 0:
+		return errors.New("garlic: no usable relay known yet besides the trusted guard (waiting for gossip from trusted peers)")
+	case circuitErr != nil:
+		return fmt.Errorf("garlic: could not build a circuit to any site relay: %w", circuitErr)
+	default:
+		return ErrDirectoryUnavailable
+	}
+}
+
+// resetSlot drops route's relay if it still uses circuit, so the next
+// refresh picks a relay again.
+func (h *HostedService) resetSlot(route *siteRoute, circuit CircuitID) {
+	route.mu.Lock()
+	defer route.mu.Unlock()
+	if route.circuit != circuit {
+		return
+	}
+	h.g.CloseCircuit(route.circuit)
+	route.circuit = CircuitID{}
+	route.current.Store(nil)
+	route.gateway = nil
 }
 
 func (h *HostedService) accept() {
@@ -364,7 +444,9 @@ func (h *HostedService) Close() error {
 		h.listener.Close()
 		h.pc.Close()
 		h.transport.Close()
-		h.route.close()
+		for _, r := range h.routes {
+			r.close()
+		}
 		h.g.sites.mu.Lock()
 		if h.g.sites.hosts[h.gid] == h {
 			delete(h.g.sites.hosts, h.gid)
@@ -377,6 +459,7 @@ func (h *HostedService) Close() error {
 type ServiceStatus struct {
 	Name          string `json:"name,omitempty"`
 	Domain        string `json:"domain"`
+	IntroPoints   int    `json:"introPoints"`
 	Published     bool   `json:"published"`
 	LastPublished string `json:"lastPublished,omitempty"`
 	Error         string `json:"error,omitempty"`
@@ -392,7 +475,7 @@ func (g *Garlic) HostedServices() []ServiceStatus {
 	status := make([]ServiceStatus, 0, len(hosts))
 	for _, h := range hosts {
 		h.mu.Lock()
-		s := ServiceStatus{Name: h.cfg.Name, Domain: h.Domain(), Published: !h.lastPublished.IsZero() && time.Since(h.lastPublished) < 180*time.Second}
+		s := ServiceStatus{Name: h.cfg.Name, Domain: h.Domain(), IntroPoints: h.introPoints, Published: !h.lastPublished.IsZero() && time.Since(h.lastPublished) < 180*time.Second}
 		if !h.lastPublished.IsZero() {
 			s.LastPublished = h.lastPublished.UTC().Format(time.RFC3339)
 		}
@@ -404,152 +487,4 @@ func (g *Garlic) HostedServices() []ServiceStatus {
 	}
 	slices.SortFunc(status, func(a, b ServiceStatus) int { return bytes.Compare([]byte(a.Domain), []byte(b.Domain)) })
 	return status
-}
-
-type siteConn struct {
-	*quic.Stream
-	conn      *quic.Conn
-	transport *quic.Transport
-	pc        *sitePacketConn
-	once      sync.Once
-}
-
-func (c *siteConn) LocalAddr() net.Addr  { return c.pc.LocalAddr() }
-func (c *siteConn) RemoteAddr() net.Addr { return flowAddr(c.pc.id) }
-func (c *siteConn) Close() error {
-	c.once.Do(func() {
-		c.Stream.CancelRead(0)
-		c.Stream.Close()
-		c.conn.CloseWithError(0, "")
-		c.pc.Close()
-		c.transport.Close()
-	})
-	return nil
-}
-
-// DialService authenticates the site's end-to-end TLS key against its GID,
-// then opens a reliable stream to an explicitly hosted virtual port.
-func (g *Garlic) DialService(ctx context.Context, domain string, port uint16) (net.Conn, error) {
-	if port != 80 && port != 443 {
-		return nil, errors.New("garlic: unsupported virtual port")
-	}
-	gid, err := ParseDomain(domain)
-	if err != nil {
-		return nil, err
-	}
-	var d *ServiceDescriptor
-	if directory, ok := g.rendezvous.(*NetworkRendezvous); ok {
-		d, err = directory.LookupContext(ctx, gid)
-	} else {
-		d, err = g.rendezvous.Lookup(gid)
-	}
-	if err != nil {
-		return nil, err
-	}
-	if err := VerifyServiceDescriptor(d, gid, uint64(time.Now().Unix())); err != nil {
-		return nil, err
-	}
-	if len(d.IntroPoints) == 0 {
-		return nil, ErrGIDNotFound
-	}
-	var last error
-	for i, p := range d.IntroPoints {
-		if i >= 3 {
-			break
-		}
-		if _, err := g.learnRelayInfo(p.RelayInfo, p.NodeKey); err != nil {
-			last = err
-			continue
-		}
-		conn, err := g.dialSiteRelay(ctx, gid, d, p.NodeKey, port)
-		if err == nil {
-			return conn, nil
-		}
-		last = err
-		if ctx.Err() != nil {
-			break
-		}
-	}
-	return nil, last
-}
-
-func (g *Garlic) dialSiteRelay(ctx context.Context, gid GID, d *ServiceDescriptor, gateway []byte, port uint16) (net.Conn, error) {
-	if len(gateway) != ed25519.PublicKeySize {
-		return nil, ErrInvalidPath
-	}
-	route := &siteRoute{g: g, gateway: bytes.Clone(gateway)}
-	pc, err := newSitePacketConn(g, gid, false, route)
-	if err != nil {
-		return nil, err
-	}
-	g.sites.mu.Lock()
-	if len(g.sites.clients) >= 64 {
-		g.sites.mu.Unlock()
-		pc.Close()
-		return nil, errors.New("garlic: client capacity reached")
-	}
-	g.sites.clients[pc.id] = pc
-	g.sites.mu.Unlock()
-	tr := &quic.Transport{Conn: pc}
-	ok := false
-	defer func() {
-		if !ok {
-			pc.Close()
-			tr.Close()
-		}
-	}()
-	tlsConf := &tls.Config{ServerName: gid.Domain(), NextProtos: []string{"yggg-site-v1"}, MinVersion: tls.VersionTLS13, InsecureSkipVerify: true,
-		VerifyConnection: func(state tls.ConnectionState) error {
-			if len(state.PeerCertificates) != 1 {
-				return errors.New("garlic: invalid site certificate")
-			}
-			cert := state.PeerCertificates[0]
-			key, ok := cert.PublicKey.(ed25519.PublicKey)
-			if !ok || !bytes.Equal(key, d.ServicePublicKey) || ComputeGID(key, d.ServiceID) != gid {
-				return ErrDescriptorGIDMismatch
-			}
-			roots := x509.NewCertPool()
-			roots.AddCert(cert)
-			if err := cert.CheckSignature(cert.SignatureAlgorithm, cert.RawTBSCertificate, cert.Signature); err != nil {
-				return err
-			}
-			_, err := cert.Verify(x509.VerifyOptions{Roots: roots, DNSName: gid.Domain(), KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}})
-			return err
-		}}
-	dialStart := time.Now()
-	conn, err := tr.Dial(ctx, flowAddr(pc.id), tlsConf, siteQUICConfig())
-	// The QUIC handshake takes about one round trip over the whole path.
-	if cur := route.current.Load(); cur != nil && (err == nil || ctx.Err() == nil) {
-		g.pathOutcome(*cur, err == nil, time.Since(dialStart))
-	}
-	if err != nil {
-		return nil, err
-	}
-	stream, err := conn.OpenStreamSync(ctx)
-	if err != nil {
-		conn.CloseWithError(0, "")
-		return nil, err
-	}
-	site := &siteConn{Stream: stream, conn: conn, transport: tr, pc: pc}
-	deadline := time.Now().Add(15 * time.Second)
-	if t, ok := ctx.Deadline(); ok {
-		deadline = minTime(deadline, t)
-	}
-	_ = stream.SetDeadline(deadline)
-	var header [2]byte
-	binary.BigEndian.PutUint16(header[:], port)
-	if _, err = stream.Write(header[:]); err == nil {
-		var status [1]byte
-		_, err = io.ReadFull(stream, status[:])
-		if err == nil && status[0] != 1 {
-			err = errors.New("garlic: service backend unavailable")
-		}
-	}
-	if err != nil {
-		site.Close()
-		return nil, err
-	}
-	_ = stream.SetDeadline(time.Time{})
-	ok = true
-	return site, nil
 }

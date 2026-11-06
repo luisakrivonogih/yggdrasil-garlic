@@ -328,28 +328,33 @@ func (g *Garlic) guardFor(ctx context.Context, need func(*CapabilityMessage) boo
 			trusted[0], trusted[i] = trusted[i], trusted[0]
 		}
 	}
-	for _, key := range trusted {
-		if slices.ContainsFunc(exclude, func(e []byte) bool { return bytes.Equal(e, key) }) {
-			continue
+	// First pass: peers whose last liveness check was answered (or that
+	// were never checked). Second pass, only if none of those works: the
+	// rest too - a missed answer is not proof that a peer is gone.
+	for pass := range 2 {
+		for _, key := range trusted {
+			if slices.ContainsFunc(exclude, func(e []byte) bool { return bytes.Equal(e, key) }) {
+				continue
+			}
+			if ctx.Err() != nil {
+				return nil, nil, ctx.Err()
+			}
+			capability, err := g.guardCapability(ctx, key, pass == 1)
+			if err != nil || !need(capability) {
+				continue
+			}
+			g.trustMu.Lock()
+			changed := !bytes.Equal(g.guard, key) && !bytes.Equal(g.savedGuard, key)
+			g.guard = bytes.Clone(key)
+			if changed {
+				g.savedGuard = bytes.Clone(key)
+			}
+			g.trustMu.Unlock()
+			if changed && g.cfg.OnGuardChange != nil {
+				go g.cfg.OnGuardChange(bytes.Clone(key))
+			}
+			return key, capability, nil
 		}
-		if ctx.Err() != nil {
-			return nil, nil, ctx.Err()
-		}
-		capability, err := g.guardCapability(ctx, key)
-		if err != nil || !need(capability) {
-			continue
-		}
-		g.trustMu.Lock()
-		changed := !bytes.Equal(g.guard, key) && !bytes.Equal(g.savedGuard, key)
-		g.guard = bytes.Clone(key)
-		if changed {
-			g.savedGuard = bytes.Clone(key)
-		}
-		g.trustMu.Unlock()
-		if changed && g.cfg.OnGuardChange != nil {
-			go g.cfg.OnGuardChange(bytes.Clone(key))
-		}
-		return key, capability, nil
 	}
 	return nil, nil, ErrNoTrustedGuard
 }
@@ -361,37 +366,80 @@ func (g *Garlic) guardFor(ctx context.Context, need func(*CapabilityMessage) boo
 // circuit built through it.
 const guardRecheck = time.Minute
 
-// guardCapability returns a trusted peer's capability, confirmed by a direct
-// answer from that peer within the last guardRecheck. Only trusted peers
-// are ever asked: they are the only nodes this node contacts directly.
-func (g *Garlic) guardCapability(ctx context.Context, key []byte) (*CapabilityMessage, error) {
+// guardCheck is the liveness state of one trusted peer.
+type guardCheck struct {
+	seen     time.Time // last direct answer
+	failed   time.Time // last check that got no answer
+	checking bool      // a background check is running
+}
+
+// guardCapability returns a trusted peer's capability for use as the
+// guard. Liveness is checked in the background, never on the caller's
+// path (circuits are built while sending packets): a stale answer is used
+// while a fresh one is requested, and a peer is skipped only once a check
+// actually went unanswered. Only trusted peers are ever asked: they are
+// the only nodes this node contacts directly.
+func (g *Garlic) guardCapability(ctx context.Context, key []byte, allowSuspect bool) (*CapabilityMessage, error) {
 	if g.core == nil {
 		// Unit-test fixture without a mesh.
 		return g.queryCapabilityContext(ctx, key)
 	}
+	cached, known := g.knownRelay(key)
 	g.trustMu.Lock()
-	seen, ok := g.guardSeen[string(key)]
-	g.trustMu.Unlock()
-	if ok && time.Since(seen) < guardRecheck {
-		if c, ok := g.knownRelay(key); ok {
-			return c, nil
-		}
+	if g.guardState == nil {
+		g.guardState = make(map[string]*guardCheck)
 	}
+	st := g.guardState[string(key)]
+	if st == nil {
+		st = &guardCheck{}
+		g.guardState[string(key)] = st
+	}
+	suspect := !st.failed.IsZero() && st.failed.After(st.seen)
+	check := time.Since(st.seen) >= guardRecheck && !st.checking && known
+	if check {
+		st.checking = true
+	}
+	g.trustMu.Unlock()
+	if check {
+		go g.checkGuard(key)
+	}
+	switch {
+	case suspect && !allowSuspect:
+		return nil, ErrCapabilityTimeout
+	case known:
+		return cached, nil
+	}
+	// First contact: nothing known about this peer yet, ask directly.
 	c, err := g.requestCapabilityContext(ctx, key)
-	g.trustMu.Lock()
-	if g.guardSeen == nil {
-		g.guardSeen = make(map[string]time.Time)
-	}
-	if err == nil {
-		g.guardSeen[string(key)] = time.Now()
-	} else {
-		delete(g.guardSeen, string(key))
-		if bytes.Equal(g.guard, key) {
-			g.guard = nil
-		}
-	}
-	g.trustMu.Unlock()
+	g.noteGuardAnswer(key, err == nil)
 	return c, err
+}
+
+func (g *Garlic) checkGuard(key []byte) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*g.cfg.CapabilityTimeout)
+	defer cancel()
+	_, err := g.requestCapabilityContext(ctx, key)
+	g.noteGuardAnswer(key, err == nil)
+}
+
+func (g *Garlic) noteGuardAnswer(key []byte, ok bool) {
+	g.trustMu.Lock()
+	defer g.trustMu.Unlock()
+	st := g.guardState[string(key)]
+	if st == nil {
+		st = &guardCheck{}
+		g.guardState[string(key)] = st
+	}
+	st.checking = false
+	if ok {
+		st.seen = time.Now()
+		st.failed = time.Time{}
+		return
+	}
+	st.failed = time.Now()
+	if bytes.Equal(g.guard, key) {
+		g.guard = nil
+	}
 }
 
 // buildPath selects an n-hop path: a trusted guard, then hops chosen only
