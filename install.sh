@@ -32,12 +32,19 @@
 #                     (never touches a distro nodejs package), since the
 #                     systemd-managed yggdrasil execs `node` directly and
 #                     must find it on PATH.
-#   GARLIC_MODE       "relay" (default for this server installer: a public
-#                     Garlic relay) or "client" (hidden node, e.g. for a
-#                     server that only hosts a site).
+#   GARLIC_MODE       "relay" or "client" (hidden node, e.g. for a server
+#                     that only hosts a site). Default: keep the mode already
+#                     set in the config; "relay" on a new install.
 #   GARLIC_TRUSTED_PEERS  comma-separated Yggdrasil node keys ("Public key"
 #                     from getSelf) of Garlic relays you trust as first hop,
-#                     written into Garlic.TrustedPeers.
+#                     added to Garlic.TrustedPeers.
+#   PEERS             comma-separated Yggdrasil peer URIs (tls://host:port),
+#                     added to Peers.
+#
+# Reinstalling never resets the config: keys, Peers, TrustedPeers and the
+# Garlic mode are kept, the lists above are only added to. Peers added at
+# runtime with yggdrasilctl addPeer / addGarlicPeer are saved to the config
+# by the daemon itself.
 #
 # Small machines (less than ~1.5-2 GB of RAM + swap) get a temporary swap
 # file under WORKDIR for the duration of the build (removed afterwards) and
@@ -55,11 +62,24 @@ REPO_BRANCH=${REPO_BRANCH:-develop}
 WORKDIR=${WORKDIR:-/opt/yggdrasil-installer}
 ENABLE_GARLIC=${ENABLE_GARLIC:-1}
 ENABLE_DASHBOARD=${ENABLE_DASHBOARD:-auto}
-GARLIC_MODE=${GARLIC_MODE:-relay}
+GARLIC_MODE=${GARLIC_MODE:-}
+PEERS=${PEERS:-}
+case "$GARLIC_MODE" in ''|client|relay) ;; *) echo "error: GARLIC_MODE must be client or relay" >&2; exit 1 ;; esac
 GARLIC_TRUSTED_PEERS=${GARLIC_TRUSTED_PEERS:-${GARLIC_BOOTSTRAP_PEERS:-}}
 
 log() { echo "==> $*"; }
 die() { echo "error: $*" >&2; exit 1; }
+
+# Validate list inputs up front: -normaliseconf does not check peer URIs,
+# and a malformed one stops the daemon at startup.
+for _p in $(echo "$PEERS" | tr ',' ' '); do
+  printf '%s' "$_p" | LC_ALL=C grep -Eq '^(tcp|tls|quic|ws|wss|socks|sockstls|unix)://[][A-Za-z0-9.:%_-]+:[0-9]{1,5}([/?][ -~]*)?$' ||
+    die "invalid peer URI in PEERS: $_p (example: tls://1.2.3.4:443)"
+done
+for _k in $(echo "$GARLIC_TRUSTED_PEERS" | tr ',' ' '); do
+  printf '%s' "$_k" | grep -Eq '^[0-9a-fA-F]{64}$' ||
+    die "invalid key in GARLIC_TRUSTED_PEERS: $_k (need the 64-hex \"Public key\" from yggdrasilctl getSelf)"
+done
 
 # ---- 0. macOS: delegate to scripts/setup.sh (launchd, no deb/rpm) ----
 if [ "$(uname -s)" = "Darwin" ]; then
@@ -352,6 +372,13 @@ for f in usr/bin/yggdrasil usr/bin/yggdrasilctl; do
 done
 log "Built $PKGFILE"
 
+# Whether the existing config sets the Garlic mode explicitly - checked
+# before the package's postinst normalises it (which writes every field).
+HAD_MODE=0
+if [ -s /etc/yggdrasil/yggdrasil.conf ] && grep -Eq '^[[:space:]]*"?Mode"?[[:space:]]*:' /etc/yggdrasil/yggdrasil.conf; then
+  HAD_MODE=1
+fi
+
 # ---- 8. Install ----
 # The package name is derived from the current branch (contrib/semver/
 # name.sh), same as the build name baked into the binary - so switching
@@ -415,7 +442,11 @@ log "Installed $("$YGG" -version | tr '\n' ' ')at $YGG"
 # than once: TrustedPeers is merged, not appended twice.
 update_config() {
   _dash=$1
-  log "Updating /etc/yggdrasil/yggdrasil.conf (Garlic=$ENABLE_GARLIC, Mode=$GARLIC_MODE, Dashboard=$_dash)"
+  # Mode: what was asked for; otherwise keep the mode the config already
+  # sets explicitly; "relay" only for a config that never had one.
+  _mode=$GARLIC_MODE
+  [ -n "$_mode" ] || [ "$HAD_MODE" = 1 ] || _mode=relay
+  log "Updating /etc/yggdrasil/yggdrasil.conf (Garlic=$ENABLE_GARLIC, Mode=${_mode:-unchanged}, Dashboard=$_dash)"
   TMP_JSON="$WORKDIR/yggdrasil.json"
   mkdir -p "$WORKDIR"
   "$YGG" -useconffile /etc/yggdrasil/yggdrasil.conf -normaliseconf -json > "$TMP_JSON"
@@ -425,34 +456,50 @@ update_config() {
     jq --argjson garlic "$([ "$ENABLE_GARLIC" = "1" ] && echo true || echo false)" \
        --argjson dash "$([ "$_dash" = "1" ] && echo true || echo false)" \
        --arg trusted "$GARLIC_TRUSTED_PEERS" \
-       --arg mode "$GARLIC_MODE" \
-       '.Garlic.Enabled = (if $garlic then true else .Garlic.Enabled end)
-        | .Garlic.Mode = $mode
+       --arg peers "$PEERS" \
+       --arg mode "$_mode" \
+       'def merge($list; $add): (($list // []) + ($add | split(",") | map(gsub("^ +| +$"; "")) | map(select(. != "")))) as $all
+          | reduce $all[] as $x ([]; if index([$x]) then . else . + [$x] end);
+        .Garlic.Enabled = (if $garlic then true else .Garlic.Enabled end)
+        | .Garlic.Mode = (if $mode != "" then $mode else .Garlic.Mode end)
         | .Dashboard.Enabled = (if $dash then true else .Dashboard.Enabled end)
-        | .Garlic.TrustedPeers = (if $trusted != "" then ((.Garlic.TrustedPeers // []) + ($trusted | split(",")) | unique) else .Garlic.TrustedPeers end)' \
+        | .Garlic.TrustedPeers = merge((.Garlic.TrustedPeers // []) | map(ascii_downcase); $trusted | ascii_downcase)
+        | .Peers = merge(.Peers; $peers)' \
        "$TMP_JSON" > "$TMP_JSON.new" && EDITED=1
   elif command -v python3 >/dev/null 2>&1; then
-    ENABLE_GARLIC="$ENABLE_GARLIC" ENABLE_DASHBOARD="$_dash" GARLIC_TRUSTED_PEERS="$GARLIC_TRUSTED_PEERS" GARLIC_MODE="$GARLIC_MODE" python3 - "$TMP_JSON" > "$TMP_JSON.new" <<'PY' && EDITED=1
+    ENABLE_GARLIC="$ENABLE_GARLIC" ENABLE_DASHBOARD="$_dash" GARLIC_TRUSTED_PEERS="$GARLIC_TRUSTED_PEERS" PEERS="$PEERS" GARLIC_MODE="$_mode" python3 - "$TMP_JSON" > "$TMP_JSON.new" <<'PY' && EDITED=1
 import json, os, sys
 with open(sys.argv[1]) as f:
     cfg = json.load(f)
+def merge(old, add):
+    out = list(old or [])
+    for x in (s.strip() for s in add.split(",")):
+        if x and x not in out:
+            out.append(x)
+    return out
 if os.environ.get("ENABLE_GARLIC") == "1":
     cfg.setdefault("Garlic", {})["Enabled"] = True
 if os.environ.get("ENABLE_DASHBOARD") == "1":
     cfg.setdefault("Dashboard", {})["Enabled"] = True
 garlic = cfg.setdefault("Garlic", {})
-garlic["Mode"] = os.environ.get("GARLIC_MODE", "relay")
-trusted = [k.strip() for k in os.environ.get("GARLIC_TRUSTED_PEERS", "").split(",") if k.strip()]
-if trusted:
-    garlic["TrustedPeers"] = sorted(set((garlic.get("TrustedPeers") or []) + trusted))
+if os.environ.get("GARLIC_MODE"):
+    garlic["Mode"] = os.environ["GARLIC_MODE"]
+garlic["TrustedPeers"] = merge([k.lower() for k in garlic.get("TrustedPeers") or []], os.environ.get("GARLIC_TRUSTED_PEERS", "").lower())
+cfg["Peers"] = merge(cfg.get("Peers"), os.environ.get("PEERS", ""))
 json.dump(cfg, sys.stdout, indent=2)
 PY
   fi
 
   if [ "$EDITED" = "1" ] && [ -s "$TMP_JSON.new" ]; then
-    "$YGG" -useconffile "$TMP_JSON.new" -normaliseconf > /etc/yggdrasil/yggdrasil.conf
-    chown root:yggdrasil /etc/yggdrasil/yggdrasil.conf
-    chmod 640 /etc/yggdrasil/yggdrasil.conf
+    # Write a new file and swap it in only when it is complete: a failed
+    # write must never leave an empty config (= new keys, no peers).
+    if ! "$YGG" -useconffile "$TMP_JSON.new" -normaliseconf > /etc/yggdrasil/yggdrasil.conf.new || [ ! -s /etc/yggdrasil/yggdrasil.conf.new ]; then
+      rm -f /etc/yggdrasil/yggdrasil.conf.new
+      die "could not write the updated config (invalid PEERS entry?) - /etc/yggdrasil/yggdrasil.conf left unchanged"
+    fi
+    chown root:yggdrasil /etc/yggdrasil/yggdrasil.conf.new
+    chmod 640 /etc/yggdrasil/yggdrasil.conf.new
+    mv /etc/yggdrasil/yggdrasil.conf.new /etc/yggdrasil/yggdrasil.conf
     rm -f "$TMP_JSON" "$TMP_JSON.new"
     systemctl restart yggdrasil
     log "Config updated, yggdrasil restarted"
@@ -460,7 +507,7 @@ PY
     log "Neither jq nor python3 found - enable manually: set \"Garlic\": { \"Enabled\": true } and/or \"Dashboard\": { \"Enabled\": true } (and \"Mode\": \"relay\", \"TrustedPeers\": [...]) in /etc/yggdrasil/yggdrasil.conf, then run 'systemctl restart yggdrasil'"
   fi
 }
-if [ "$ENABLE_GARLIC" = "1" ] || [ -n "$GARLIC_TRUSTED_PEERS" ]; then
+if [ "$ENABLE_GARLIC" = "1" ] || [ -n "$GARLIC_TRUSTED_PEERS" ] || [ -n "$PEERS" ] || [ -n "$GARLIC_MODE" ]; then
   update_config 0
 fi
 

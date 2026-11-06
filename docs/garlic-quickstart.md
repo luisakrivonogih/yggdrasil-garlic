@@ -25,15 +25,21 @@ sudo -E PEERS="tls://IP_СЕРВЕРА:ПОРТ" TRUSTED="<Public key серве
 ```
 
 ```powershell
-# Windows: build/install, затем впишите TrustedPeers в конфиг вручную
-powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 install -Peers "tls://IP:ПОРТ"
+# Windows
+powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 install -Peers "tls://IP:ПОРТ" -Trusted "<Public key сервера>"
 ```
 
 Переменные установщика: `PEERS` (обычные пиры Yggdrasil), `TRUSTED` (доверенные
 Garlic-relay), `MODE` (`client`/`relay`), `SITE_ADDR` (локальный HTTP-сервер для сайта).
-На Linux-сервере: `GARLIC_MODE` (по умолчанию `relay`), `GARLIC_TRUSTED_PEERS`.
+На Linux-сервере: `PEERS`, `GARLIC_TRUSTED_PEERS`, `GARLIC_MODE` (по умолчанию
+остаётся прежний режим; `relay` при первой установке).
 Скрипт сам делает `git pull`, переносит старый конфиг на новые поля и проверяет
 итоговый конфиг перед перезапуском (при ошибке остаётся прежний).
+
+**Переустановка ничего не сбрасывает:** ключи, `Peers`, `TrustedPeers` и режим
+сохраняются, `PEERS`/`TRUSTED` только добавляются к спискам (`REPLACE_LISTS=1` —
+заменить). Перед каждой установкой пакет кладёт копию конфига в
+`/var/backups/yggdrasil.conf.<дата-время>`.
 
 ## 3. Доверенные пиры и первый хоп
 
@@ -46,12 +52,14 @@ Garlic-relay), `MODE` (`client`/`relay`), `SITE_ADDR` (локальный HTTP-�
 Это не Garlic-ключ: onion-ключи ротируются и в конфиг не пишутся.
 
 ```sh
-yggdrasilctl addGarlicPeer key=<ключ узла>     # проверяет и добавляет до перезапуска
-yggdrasilctl removeGarlicPeer key=<ключ узла>
+yggdrasilctl addGarlicPeer key=<ключ узла>     # проверяет, добавляет и сохраняет в конфиг
+yggdrasilctl removeGarlicPeer key=<ключ узла>  # убирает и из конфига
 yggdrasilctl getGarlicPeers                     # доверенные, текущий guard, известные relay
 ```
 
-Чтобы сохранить после перезапуска — впишите ключ в конфиг:
+`addGarlicPeer`/`removeGarlicPeer`, как и `addPeer`/`removePeer`, сразу записывают
+изменение в файл конфига, с которым запущен демон (`saved: true` в ответе). То же
+самое вручную:
 ```hjson
 Garlic: {
   Enabled: true
@@ -129,8 +137,9 @@ relay ваши).
 | `... not enough topologically diverse candidates: ... closer ...` | все relay соединены с узлом напрямую: см. абзац выше про `MinHopCount` |
 | `no trusted Garlic peers configured` | не задан `TrustedPeers` (или `addGarlicPeer` потерялся после перезапуска) |
 
-`addGarlicPeer` действует до перезапуска, как и `addPeer`. Постоянно — только через
-`Garlic.TrustedPeers` в конфиге (или `GARLIC_TRUSTED_PEERS` / `TRUSTED` при установке).
+`addPeer` и `addGarlicPeer` сохраняются в конфиг. Если в ответе `saved: false`,
+причина в `saveError` (например, конфиг недоступен для записи) — тогда пир действует
+только до перезапуска.
 
 ## 7. Что видит каждый участник
 

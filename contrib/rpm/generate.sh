@@ -105,17 +105,28 @@ if [ ! -d /etc/yggdrasil ]; then
     chmod 750 /etc/yggdrasil
 fi
 
-if [ -f /etc/yggdrasil/yggdrasil.conf ]; then
+if [ -s /etc/yggdrasil/yggdrasil.conf ]; then
   mkdir -p /var/backups
-  echo "Backing up configuration file to /var/backups/yggdrasil.conf.\`date +%Y%m%d\`"
-  cp /etc/yggdrasil/yggdrasil.conf /var/backups/yggdrasil.conf.\`date +%Y%m%d\`
+  backup_path=/var/backups/yggdrasil.conf.\`date +%Y%m%d-%H%M%S\`
+  echo "Backing up configuration file to \$backup_path"
+  cp /etc/yggdrasil/yggdrasil.conf "\$backup_path"
+  chmod 640 "\$backup_path"
 
+  # Never truncate the config (see contrib/deb/generate.sh).
   echo "Normalising and updating /etc/yggdrasil/yggdrasil.conf"
-  /usr/bin/yggdrasil -useconf -normaliseconf < /var/backups/yggdrasil.conf.\`date +%Y%m%d\` > /etc/yggdrasil/yggdrasil.conf
+  if /usr/bin/yggdrasil -useconf -normaliseconf < "\$backup_path" > /etc/yggdrasil/yggdrasil.conf.new && [ -s /etc/yggdrasil/yggdrasil.conf.new ]; then
+    mv /etc/yggdrasil/yggdrasil.conf.new /etc/yggdrasil/yggdrasil.conf
+  else
+    rm -f /etc/yggdrasil/yggdrasil.conf.new
+    echo "Could not normalise the configuration - keeping it unchanged"
+  fi
 
   chown root:yggdrasil /etc/yggdrasil/yggdrasil.conf
   chmod 640 /etc/yggdrasil/yggdrasil.conf
 else
+  if ls /var/backups/yggdrasil.conf.* >/dev/null 2>&1; then
+    echo "NOTE: /etc/yggdrasil/yggdrasil.conf is missing or empty; earlier configs (keys, peers) are in /var/backups/yggdrasil.conf.*"
+  fi
   echo "Generating initial configuration file /etc/yggdrasil/yggdrasil.conf"
   (umask 037 && /usr/bin/yggdrasil -genconf > /etc/yggdrasil/yggdrasil.conf)
 

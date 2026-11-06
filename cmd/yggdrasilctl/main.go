@@ -331,6 +331,18 @@ func run() (exitCode int) {
 		_ = table.Render()
 
 	case "addpeer", "removepeer":
+		var resp struct {
+			Saved     *bool  `json:"saved"`
+			Config    string `json:"config"`
+			SaveError string `json:"saveError"`
+		}
+		if err := json.Unmarshal(recv.Response, &resp); err == nil && resp.Saved != nil {
+			if *resp.Saved {
+				fmt.Println("Done, saved to", resp.Config)
+			} else {
+				fmt.Printf("Done, but not saved to %s (lasts until restart): %s\n", resp.Config, resp.SaveError)
+			}
+		}
 
 	default:
 		fmt.Println(string(recv.Response))

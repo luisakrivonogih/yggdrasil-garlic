@@ -5,13 +5,17 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 uninstall   (от администратора)
 #
 # Параметры: -Peers "tls://host:port,tls://host2:port"  -SiteAddr "127.0.0.1:8080"
-#            -Trusted "<ключ узла relay>,..."  -Mode client|relay
+#            -Trusted "<ключ узла relay>,..."  -Mode client|relay  -ReplaceLists
+# -Peers и -Trusted дополняют списки в конфиге (с -ReplaceLists заменяют их).
+# Переустановка не сбрасывает ключи и пиры; пиры, добавленные через
+# yggdrasilctl addPeer / addGarlicPeer, демон сам сохраняет в конфиг.
 param(
   [ValidateSet('build','install','uninstall')][string]$Command = 'build',
   [string]$Peers = '',
   [string]$SiteAddr = '',
   [string]$Trusted = '',
   [ValidateSet('','client','relay')][string]$Mode = '',
+  [switch]$ReplaceLists,
   [string]$InstallDir = "$env:ProgramFiles\Yggdrasil"
 )
 $ErrorActionPreference = 'Stop'
@@ -37,36 +41,60 @@ function Build {
   Write-Host "Готово: $Root\bin\yggdrasil.exe, yggdrasilctl.exe"
 }
 
-function Configure {
-  New-Item -ItemType Directory -Force (Split-Path $ConfPath) | Out-Null
-  if (-not (Test-Path $ConfPath)) {
-    Write-Host "==> создаю $ConfPath"
-    & "$InstallDir\yggdrasil.exe" -genconf | Out-File -Encoding ascii $ConfPath
-  } else { Write-Host "==> $ConfPath уже есть, ключи не трогаю" }
-  Copy-Item $ConfPath "$ConfPath.bak" -Force
-  $t = (& "$InstallDir\yggdrasil.exe" -useconffile $ConfPath -normaliseconf) -join "`n"
-  $t = [regex]::Replace($t, '(?ms)(^\s*Garlic:\s*\{.*?^\s*Enabled:) false', '$1 true')
-  if ($Peers) {
-    $list = ($Peers -split ',' | ForEach-Object { '"' + $_.Trim() + '"' }) -join ' '
-    $t = [regex]::Replace($t, '(?m)^(\s*)Peers: \[\]', "`$1Peers: [ $list ]")
+# Merge-List: старый список + новые элементы через запятую, без повторов.
+function Merge-List($old, [string]$add, [switch]$Lower) {
+  $out = New-Object System.Collections.Generic.List[string]
+  foreach ($x in @($old) + @($add -split ',')) {
+    if ($null -eq $x) { continue }
+    $v = "$x".Trim()
+    if ($Lower) { $v = $v.ToLower() }
+    if ($v -and -not $out.Contains($v)) { $out.Add($v) }
   }
-  if ($Mode) {
-    $t = [regex]::Replace($t, '(?m)^(\s*)Mode: .*$', "`$1Mode: $Mode")
+  return ,$out.ToArray()
+}
+
+# Configure правит конфиг через его JSON-представление: Peers и TrustedPeers
+# дополняются (с -ReplaceLists заменяются), ключи и остальное не трогаются.
+function Configure {
+  $ygg = "$InstallDir\yggdrasil.exe"
+  New-Item -ItemType Directory -Force (Split-Path $ConfPath) | Out-Null
+  if (-not (Test-Path $ConfPath) -or (Get-Item $ConfPath).Length -eq 0) {
+    Write-Host "==> создаю $ConfPath"
+    & $ygg -genconf | Out-File -Encoding ascii $ConfPath
+  } else { Write-Host "==> $ConfPath уже есть, ключи и пиры сохраняю" }
+  Copy-Item $ConfPath "$ConfPath.bak" -Force
+  $json = (& $ygg -useconffile $ConfPath -normaliseconf -json) -join "`n"
+  if ($LASTEXITCODE -ne 0 -or -not $json) { throw "Текущий конфиг $ConfPath не читается, оставляю как есть" }
+  $c = $json | ConvertFrom-Json
+  $c.Garlic.Enabled = $true
+  if ($Mode) { $c.Garlic.Mode = $Mode }
+  if ($Peers) {
+    foreach ($p in $Peers -split ',') {
+      if ($p.Trim() -notmatch '^(tcp|tls|quic|ws|wss|socks|sockstls|unix)://[][A-Za-z0-9.:%_-]+:[0-9]{1,5}([/?][ -~]*)?$') {
+        throw "Неверный адрес пира: $p (пример: tls://1.2.3.4:443)"
+      }
+    }
+    $old = if ($ReplaceLists) { @() } else { $c.Peers }
+    $c.Peers = Merge-List $old $Peers
   }
   if ($Trusted) {
     $keys = $Trusted -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^[0-9a-fA-F]{64}$' }
     if (-not $keys) { throw 'Trusted: нужны 64-символьные hex-ключи узлов (Public key из getSelf)' }
-    $list = ($keys | ForEach-Object { '"' + $_ + '"' }) -join ' '
-    $t = [regex]::Replace($t, '(?m)^(\s*)TrustedPeers: \[.*$', "`$1TrustedPeers: [ $list ]")
+    $old = if ($ReplaceLists) { @() } else { @($c.Garlic.TrustedPeers | ForEach-Object { "$_".ToLower() }) }
+    $c.Garlic.TrustedPeers = Merge-List $old ($keys -join ',') -Lower
   }
-  if ($SiteAddr) {
-    $t = [regex]::Replace($t, '(?m)^(\s*)Services: \[\]', "`$1Services: [ { ServiceID: `"`", LocalAddr: `"$SiteAddr`" } ]")
+  $services = @($c.Garlic.Services | Where-Object { $null -ne $_ })
+  if ($SiteAddr -and $services.Count -eq 0) {
+    $c.Garlic.Services = @([pscustomobject]@{ ServiceID = ''; LocalAddr = $SiteAddr })
   }
-  $tmp = "$ConfPath.tmp"
-  Set-Content -Encoding ascii $tmp $t
-  & "$InstallDir\yggdrasil.exe" -useconffile $tmp -normaliseconf | Out-Null
-  if ($LASTEXITCODE -ne 0) { Remove-Item $tmp; throw "Новый конфиг не прошёл проверку, оставляю прежний $ConfPath" }
-  Move-Item $tmp $ConfPath -Force
+  $tmpJson = "$ConfPath.tmp.json"
+  $c | ConvertTo-Json -Depth 20 | Set-Content -Encoding ascii $tmpJson
+  $out = (& $ygg -useconffile $tmpJson -normaliseconf) -join "`n"
+  $ok = ($LASTEXITCODE -eq 0) -and $out
+  Remove-Item $tmpJson
+  if (-not $ok) { throw "Новый конфиг не прошёл проверку, оставляю прежний $ConfPath" }
+  Set-Content -Encoding ascii "$ConfPath.tmp" $out
+  Move-Item "$ConfPath.tmp" $ConfPath -Force
 }
 
 function Install {

@@ -72,6 +72,19 @@ func (a *AdminSocket) AddHandler(name, desc string, args []string, handlerfunc c
 	return nil
 }
 
+// WrapHandler replaces an existing handler with wrap(handler), for example
+// to add a side effect after it succeeds.
+func (a *AdminSocket) WrapHandler(name string, wrap func(core.AddHandlerFunc) core.AddHandlerFunc) error {
+	key := strings.ToLower(name)
+	h, ok := a.handlers[key]
+	if !ok {
+		return errors.New("handler not found")
+	}
+	h.handler = wrap(h.handler)
+	a.handlers[key] = h
+	return nil
+}
+
 // Init runs the initial admin setup.
 func New(c *core.Core, log core.Logger, opts ...SetupOption) (*AdminSocket, error) {
 	a := &AdminSocket{

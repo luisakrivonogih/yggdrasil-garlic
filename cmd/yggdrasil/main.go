@@ -179,16 +179,7 @@ func main() {
 		return
 
 	case *normaliseconf:
-		cfg.AdminListen = ""
-		if cfg.PrivateKeyPath != "" {
-			cfg.PrivateKey = nil
-		}
-		var bs []byte
-		if *confjson {
-			bs, err = json.MarshalIndent(cfg, "", "  ")
-		} else {
-			bs, err = hjson.Marshal(cfg)
-		}
+		bs, err := marshalConfig(cfg, *confjson)
 		if err != nil {
 			panic(err)
 		}
@@ -409,6 +400,13 @@ func main() {
 				}()
 			}
 		}
+	}
+
+	// Peers added or removed at runtime (addPeer, addGarlicPeer, ...) are
+	// written back to the config file, so they survive restarts and
+	// reinstalls. Not possible with -useconf (config from stdin).
+	if n.admin != nil && *useconffile != "" {
+		setupConfigPersistence(n.admin, &configPersister{path: *useconffile, privateKey: privateKey}, logger)
 	}
 
 	// Set up the local operator dashboard (optional, disabled by

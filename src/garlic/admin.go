@@ -72,7 +72,7 @@ func (g *Garlic) SetupAdminHandlers(a *admin.AdminSocket) {
 			}, nil
 		})
 
-	_ = a.AddHandler("addGarlicPeer", "Trust a Garlic relay as a first hop, by its Yggdrasil node key (the \"Public key\" from getSelf). Verified before it is added; lasts until restart unless also listed in Garlic.TrustedPeers", []string{"key"},
+	_ = a.AddHandler("addGarlicPeer", "Trust a Garlic relay as a first hop, by its Yggdrasil node key (the \"Public key\" from getSelf). Verified before it is added, and saved to Garlic.TrustedPeers in the config file", []string{"key"},
 		func(in json.RawMessage) (interface{}, error) {
 			var req struct {
 				Key string `json:"key"`
@@ -84,10 +84,10 @@ func (g *Garlic) SetupAdminHandlers(a *admin.AdminSocket) {
 			if err != nil {
 				return nil, err
 			}
-			return map[string]interface{}{"added": hex.EncodeToString(key), "persist": "add it to Garlic.TrustedPeers to keep it after a restart"}, nil
+			return map[string]interface{}{"added": hex.EncodeToString(key)}, nil
 		})
 
-	_ = a.AddHandler("removeGarlicPeer", "Stop trusting a Garlic relay (until restart, if it is also in Garlic.TrustedPeers)", []string{"key"},
+	_ = a.AddHandler("removeGarlicPeer", "Stop trusting a Garlic relay, and remove it from Garlic.TrustedPeers in the config file", []string{"key"},
 		func(in json.RawMessage) (interface{}, error) {
 			var req struct {
 				Key string `json:"key"`

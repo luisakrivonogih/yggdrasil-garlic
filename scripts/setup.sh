@@ -7,10 +7,14 @@
 #   sh scripts/setup.sh uninstall        остановить сервис и удалить бинарники (конфиг остаётся)
 #
 # Переменные окружения:
-#   PEERS="tls://host:port,tls://host2:port"   пиры обычной сети Yggdrasil (заменяют список в конфиге)
+#   PEERS="tls://host:port,tls://host2:port"   пиры обычной сети Yggdrasil (добавляются к списку в конфиге)
 #   SITE_ADDR=127.0.0.1:8080                   опубликовать локальный HTTP-сервер как .yggg сайт
 #   TRUSTED="<ключ узла>,<ключ узла>"          доверенные Garlic-relay (Public key из getSelf), первый хоп;
-#                                              заменяют список Garlic.TrustedPeers в конфиге
+#                                              добавляются к Garlic.TrustedPeers
+#   REPLACE_LISTS=1                            PEERS и TRUSTED заменяют списки, а не дополняют их
+#
+# Переустановка ничего не сбрасывает: ключи, пиры и режим остаются. Пиры,
+# добавленные через yggdrasilctl addPeer / addGarlicPeer, демон сам сохраняет в конфиг.
 #   MODE=client|relay                          client (по умолчанию, скрытый) или relay (публичный, для серверов)
 #   PREFIX=/usr/local                          куда ставить бинарники
 set -e
@@ -71,6 +75,22 @@ set_list() {
     { print }' "$1" > "$1.new" && mv "$1.new" "$1"
 }
 
+# json_list KEY - элементы массива KEY из текущего конфига, по одному в строке
+# (Peers или TrustedPeers; ищется по JSON-выводу -normaliseconf).
+json_list() {
+  "$YGG" -useconffile "$CONF" -normaliseconf -json | awk -v key="$1" '
+    $0 ~ "^ *\"" key "\": \\[\\]" { exit }
+    $0 ~ "^ *\"" key "\": \\[" { on = 1; next }
+    on && /^ *\]/ { exit }
+    on { gsub(/^ *"|",? *$/, ""); print }'
+}
+
+# merge_quoted "OLD" "NEW" - объединяет два списка (по строке на элемент) без
+# повторов и с сохранением порядка, в виде "a" "b" для set_list.
+merge_quoted() {
+  printf '%s\n%s\n' "$1" "$2" | awk 'NF && !seen[$0]++ { printf "\"%s\" ", $0 }'
+}
+
 # Правит конфиг: включает Garlic, режим, доверенные пиры, обычные пиры и сайт.
 # Старый конфиг сначала нормализуется (переходит на новые поля), а итог
 # проверяется до перезапуска - при ошибке возвращается резервная копия.
@@ -93,9 +113,10 @@ configure() {
     eval "$SED_I -E 's/^    Mode: .*/    Mode: $MODE/' \"$TMP\""
   fi
   if [ -n "$TRUSTED" ]; then
-    LIST=$(echo "$TRUSTED" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | grep -E '^[0-9a-fA-F]{64}$' | sed 's/.*/"&"/' | tr '\n' ' ')
-    [ -n "$LIST" ] || { echo "TRUSTED: нужны 64-символьные hex-ключи узлов (Public key из getSelf)" >&2; rm -f "$TMP"; return 1; }
-    set_list "$TMP" "    TrustedPeers:" "$LIST"
+    NEW=$(echo "$TRUSTED" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | grep -E '^[0-9a-fA-F]{64}$' | tr 'A-F' 'a-f')
+    [ -n "$NEW" ] || { echo "TRUSTED: нужны 64-символьные hex-ключи узлов (Public key из getSelf)" >&2; rm -f "$TMP"; return 1; }
+    OLD=""; [ "${REPLACE_LISTS:-0}" = 1 ] || OLD=$(json_list TrustedPeers | tr 'A-F' 'a-f')
+    set_list "$TMP" "    TrustedPeers:" "$(merge_quoted "$OLD" "$NEW")"
   fi
   if [ -n "$PEERS" ]; then
     # -normaliseconf не проверяет адреса пиров, а неверный адрес роняет демон
@@ -107,8 +128,9 @@ configure() {
         return 1
       fi
     done
-    LIST=$(echo "$PEERS" | tr ',' '\n' | sed 's/^ *//;s/ *$//;s/.*/"&"/' | tr '\n' ' ')
-    set_list "$TMP" "  Peers:" "$LIST"
+    NEW=$(echo "$PEERS" | tr ',' '\n' | sed 's/^ *//;s/ *$//')
+    OLD=""; [ "${REPLACE_LISTS:-0}" = 1 ] || OLD=$(json_list Peers)
+    set_list "$TMP" "  Peers:" "$(merge_quoted "$OLD" "$NEW")"
   fi
   if [ -n "$SITE_ADDR" ]; then
     eval "$SED_I -E 's|^    Services: \\[\\]|    Services: [ { ServiceID: \"\", LocalAddr: \"$SITE_ADDR\" } ]|' \"$TMP\""
