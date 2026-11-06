@@ -354,7 +354,6 @@ func main() {
 			gcfg.TrustedPeers = trustedPeers
 			gcfg.TrustOutboundPeers = cfg.Garlic.TrustOutboundPeers
 			gcfg.OnionKeyRotation = rotation
-			gcfg.AllowServicesOnRelay = cfg.Garlic.AllowServicesOnRelay
 			gcfg.AutoPoolEnabled = cfg.Garlic.AutoPoolEnabled
 			gcfg.AutoPoolSize = cfg.Garlic.AutoPoolSize
 			if gcfg.AutoRotationInterval, err = time.ParseDuration(cfg.Garlic.AutoRotationInterval); err != nil {
@@ -384,8 +383,11 @@ func main() {
 				}
 				logger.Printf("Garlic browser proxy: http://%s (PAC: http://%s/proxy.pac)", n.garlicProxy.Addr(), n.garlicProxy.Addr())
 			}
+			if len(cfg.Garlic.Services) > 0 && !hidden {
+				logger.Warnf("This public relay also hosts sites. Each site is still reached only through circuits and cannot be linked to this node cryptographically, but anyone can see when a relay is online and compare that with when the sites are. For stronger anonymity host sites on a node in Mode: client.")
+			}
 			for _, service := range cfg.Garlic.Services {
-				host, err := n.garlic.StartService(garlic.ServiceConfig{ServiceID: service.ServiceID, LocalAddr: service.LocalAddr, TLSLocalAddr: service.TLSLocalAddr})
+				host, err := n.garlic.StartService(garlic.ServiceConfig{Name: service.Name, ServiceID: service.ServiceID, LocalAddr: service.LocalAddr, TLSLocalAddr: service.TLSLocalAddr})
 				if err != nil {
 					logger.Errorf("Garlic website not started: %v", err)
 					continue

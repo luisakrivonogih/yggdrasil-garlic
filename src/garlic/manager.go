@@ -116,10 +116,6 @@ type Config struct {
 	// previous key is kept for a grace period and then wiped (onionkeys.go).
 	OnionKeyRotation time.Duration
 
-	// AllowServicesOnRelay permits hosting sites in relay mode, which links
-	// the site's availability to a publicly listed relay. Off by default.
-	AllowServicesOnRelay bool
-
 	// AutoPoolEnabled turns on the background circuit pool + rotation +
 	// (if CoverTrafficEnabled) cover traffic. A node can still relay/
 	// terminate for another node's auto-pool circuits with this off -
@@ -271,9 +267,10 @@ type Garlic struct {
 	selfInfo    *RelayInfo
 	selfInfoRaw []byte
 
-	trustMu sync.Mutex
-	trusted map[string][]byte // configured and runtime-added trusted node keys
-	guard   []byte            // current trusted first hop
+	trustMu   sync.Mutex
+	trusted   map[string][]byte    // configured and runtime-added trusted node keys
+	guard     []byte               // current trusted first hop
+	guardSeen map[string]time.Time // when each trusted peer last answered directly
 
 	mu              sync.Mutex
 	capabilityCache map[string]*cachedRelay
@@ -1592,9 +1589,14 @@ func (g *Garlic) RecvGarlicAuto(timeout time.Duration) (*AutoDeliveredMessage, e
 // descriptor is signed with this node's Garlic signing identity
 // (Identity.SigningPrivateKey), never the X25519 circuit-hop key.
 func (g *Garlic) PublishService(serviceID []byte, introPoints []IntroPoint, ttl time.Duration) (GID, error) {
-	gid := ComputeGID(g.identity.SigningPublicKey, serviceID)
+	key, err := SiteSigningKey(g.identity.SigningPrivateKey, "", serviceID)
+	if err != nil {
+		return GID{}, err
+	}
+	pub := key.Public().(ed25519.PublicKey)
+	gid := ComputeGID(pub, serviceID)
 	now := uint64(time.Now().Unix())
-	descriptor, err := SignServiceDescriptor(g.identity.SigningPublicKey, g.identity.SigningPrivateKey, serviceID, introPoints, now, now+uint64(ttl.Seconds()))
+	descriptor, err := SignServiceDescriptor(pub, key, serviceID, introPoints, now, now+uint64(ttl.Seconds()))
 	if err != nil {
 		return GID{}, err
 	}

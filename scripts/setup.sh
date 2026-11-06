@@ -8,7 +8,8 @@
 #
 # Переменные окружения:
 #   PEERS="tls://host:port,tls://host2:port"   пиры обычной сети Yggdrasil (добавляются к списку в конфиге)
-#   SITE_ADDR=127.0.0.1:8080                   опубликовать локальный HTTP-сервер как .yggg сайт
+#   SITE_ADDR=127.0.0.1:8090                   опубликовать локальный HTTP-сервер как .yggg сайт
+#   SITE_NAME=blog                             имя сайта (у каждого имени свой ключ и домен; без имени - домен узла)
 #   TRUSTED="<ключ узла>,<ключ узла>"          доверенные Garlic-relay (Public key из getSelf), первый хоп;
 #                                              добавляются к Garlic.TrustedPeers
 #   REPLACE_LISTS=1                            PEERS и TRUSTED заменяют списки, а не дополняют их
@@ -133,7 +134,13 @@ configure() {
     set_list "$TMP" "  Peers:" "$(merge_quoted "$OLD" "$NEW")"
   fi
   if [ -n "$SITE_ADDR" ]; then
-    eval "$SED_I -E 's|^    Services: \\[\\]|    Services: [ { ServiceID: \"\", LocalAddr: \"$SITE_ADDR\" } ]|' \"$TMP\""
+    ENTRY="{ ServiceID: \"\", LocalAddr: \"$SITE_ADDR\" }"
+    [ -z "$SITE_NAME" ] || ENTRY="{ Name: \"$SITE_NAME\", ServiceID: \"\", LocalAddr: \"$SITE_ADDR\" }"
+    if grep -q '^    Services: \[\]$' "$TMP"; then
+      awk -v e="$ENTRY" '$0 == "    Services: []" { print "    Services: [ " e " ]"; next } { print }' "$TMP" > "$TMP.s" && mv "$TMP.s" "$TMP"
+    else
+      echo "В Garlic.Services уже есть сайты - добавьте этот в $CONF вручную: $ENTRY" >&2
+    fi
   fi
   if ! "$YGG" -useconffile "$TMP" -normaliseconf > /dev/null 2>&1; then
     echo "Новый конфиг не прошёл проверку (неверный адрес пира?) - оставляю прежний $CONF" >&2

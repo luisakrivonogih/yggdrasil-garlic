@@ -138,6 +138,11 @@ func TestAutoCreateCircuitSkipsTrustedGuardMissingGarlicV3(t *testing.T) {
 		expiresAt:   old.expiresAt,
 	}
 	gOrigin.mu.Unlock()
+	// Both trusted peers answered just now, so the cached relay information
+	// (not a fresh request) decides whether a guard is usable.
+	gOrigin.trustMu.Lock()
+	gOrigin.guardSeen = map[string]time.Time{string(nodes[1].PublicKey()): time.Now(), string(nodes[2].PublicKey()): time.Now()}
+	gOrigin.trustMu.Unlock()
 	for range 8 {
 		id, err := gOrigin.AutoCreateCircuit(1)
 		if err != nil {
@@ -149,4 +154,40 @@ func TestAutoCreateCircuitSkipsTrustedGuardMissingGarlicV3(t *testing.T) {
 		}
 		gOrigin.CloseCircuit(id)
 	}
+}
+
+// A trusted guard that stops answering (went offline, or switched to
+// hidden mode) must not be kept just because its signed relay information
+// is still valid: the next circuit uses another trusted peer.
+func TestGuardThatStopsAnsweringIsReplaced(t *testing.T) {
+	gOrigin, _, nodes := guardFixture(t, 2, func(int) bool { return true })
+	id, err := gOrigin.AutoCreateCircuit(1)
+	if err != nil {
+		t.Fatalf("AutoCreateCircuit returned error: %v", err)
+	}
+	gOrigin.CloseCircuit(id)
+	first := gOrigin.CurrentGuard()
+	for _, n := range nodes[1:] {
+		if bytes.Equal(n.PublicKey(), first) {
+			n.SetGarlicHandler(nil) // stops answering and relaying
+		}
+	}
+	gOrigin.trustMu.Lock()
+	gOrigin.guardSeen[string(first)] = time.Now().Add(-2 * guardRecheck)
+	gOrigin.trustMu.Unlock()
+
+	id, err = gOrigin.AutoCreateCircuit(1)
+	if err != nil {
+		t.Fatalf("no circuit after the guard stopped answering: %v", err)
+	}
+	c, _ := gOrigin.circuits.Get(id)
+	if bytes.Equal(c.HopKeys()[0], first) || bytes.Equal(gOrigin.CurrentGuard(), first) {
+		t.Fatal("kept using a trusted guard that no longer answers")
+	}
+	for _, k := range gOrigin.TrustedPeerKeys() {
+		if k == hex.EncodeToString(first) {
+			return // still trusted: only skipped while it does not answer
+		}
+	}
+	t.Fatal("a guard that stopped answering was removed from the trusted peers")
 }

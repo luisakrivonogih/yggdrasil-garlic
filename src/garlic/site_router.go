@@ -268,7 +268,7 @@ func (r *siteRouter) handle(e siteEvent) {
 	}
 }
 
-func (r *siteRouter) register(ctx context.Context, id CircuitID, gateway []byte, d *ServiceDescriptor) error {
+func (r *siteRouter) register(ctx context.Context, id CircuitID, gateway []byte, d *ServiceDescriptor, key ed25519.PrivateKey) error {
 	c, ok := r.g.circuits.Get(id)
 	if !ok {
 		return ErrCircuitNotFound
@@ -277,7 +277,7 @@ func (r *siteRouter) register(ctx context.Context, id CircuitID, gateway []byte,
 	terminal := c.hops[len(c.hops)-1].LocalCircuitID
 	c.mu.Unlock()
 	gid := ComputeGID(d.ServicePublicKey, d.ServiceID)
-	reg := siteRegistration{d, ed25519.Sign(r.g.identity.SigningPrivateKey, registrationBytes(gid, gateway, terminal))}
+	reg := siteRegistration{d, ed25519.Sign(key, registrationBytes(gid, gateway, terminal))}
 	body, err := json.Marshal(reg)
 	if err != nil {
 		return err

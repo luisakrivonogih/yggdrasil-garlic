@@ -29,9 +29,10 @@ func (g *Garlic) SetupAdminHandlers(a *admin.AdminSocket) {
 			return g.identityResponse(), nil
 		})
 
-	_ = a.AddHandler("getGarlicDomain", "Get this identity's hash.domains.yggg address without publishing; serviceId is optional hex (empty for the default service)", []string{"[serviceId]"},
+	_ = a.AddHandler("getGarlicDomain", "Get the hash.domains.yggg address of this node's site called name (empty: the default domain) without publishing; serviceId is optional hex", []string{"[name]", "[serviceId]"},
 		func(in json.RawMessage) (interface{}, error) {
 			var req struct {
+				Name      string `json:"name"`
 				ServiceID string `json:"serviceId"`
 			}
 			if err := json.Unmarshal(in, &req); err != nil {
@@ -41,13 +42,17 @@ func (g *Garlic) SetupAdminHandlers(a *admin.AdminSocket) {
 			if err != nil {
 				return nil, fmt.Errorf("invalid serviceId: %w", err)
 			}
-			if len(serviceID) > maxServiceIDSize {
-				return nil, ErrServiceIDTooLarge
+			gid, err := g.SiteGID(req.Name, serviceID)
+			if err != nil {
+				return nil, err
 			}
-			gid := ComputeGID(g.identity.SigningPublicKey, serviceID)
-			return map[string]string{
+			out := map[string]string{
 				"gid": gid.String(), "domain": gid.Domain(), "serviceId": hex.EncodeToString(serviceID),
-			}, nil
+			}
+			if req.Name != "" {
+				out["name"] = req.Name
+			}
+			return out, nil
 		})
 
 	_ = a.AddHandler("resolveGarlicDomain", "Resolve a hash.domains.yggg address to verified introduction points in the configured rendezvous", []string{"domain"},

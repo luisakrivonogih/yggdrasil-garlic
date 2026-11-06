@@ -45,7 +45,6 @@ var (
 	ErrNoTrustedGuard      = errors.New("garlic: none of the trusted Garlic peers is reachable as a first hop")
 	ErrUnknownRelay        = errors.New("garlic: no verified relay information for this hop")
 	ErrUntrustedFirstHop   = errors.New("garlic: the first hop of a circuit must be a trusted peer")
-	ErrServiceOnRelay      = errors.New("garlic: refusing to host a site on a public relay (it would link the site to this node); use Mode \"client\" or set AllowServicesOnRelay")
 	ErrInvalidTrustedPeer  = errors.New("garlic: trusted peer key must be 32 bytes (the node's Yggdrasil public key from getSelf)")
 	ErrTrustedPeerIsGarlic = errors.New("garlic: that is a Garlic onion key, not a node key - use the \"Public key\" from yggdrasilctl getSelf")
 )
@@ -336,7 +335,7 @@ func (g *Garlic) guardFor(ctx context.Context, need func(*CapabilityMessage) boo
 		if ctx.Err() != nil {
 			return nil, nil, ctx.Err()
 		}
-		capability, err := g.queryCapabilityContext(ctx, key)
+		capability, err := g.guardCapability(ctx, key)
 		if err != nil || !need(capability) {
 			continue
 		}
@@ -346,6 +345,46 @@ func (g *Garlic) guardFor(ctx context.Context, need func(*CapabilityMessage) boo
 		return key, capability, nil
 	}
 	return nil, nil, ErrNoTrustedGuard
+}
+
+// guardRecheck is how long a trusted peer's direct answer counts before it
+// is asked again. Its signed RelayInfo stays valid for an hour or more, so
+// the RelayInfo alone cannot tell that the peer stopped relaying (switched
+// to hidden mode, went offline) - and a dead guard silently loses every
+// circuit built through it.
+const guardRecheck = time.Minute
+
+// guardCapability returns a trusted peer's capability, confirmed by a direct
+// answer from that peer within the last guardRecheck. Only trusted peers
+// are ever asked: they are the only nodes this node contacts directly.
+func (g *Garlic) guardCapability(ctx context.Context, key []byte) (*CapabilityMessage, error) {
+	if g.core == nil {
+		// Unit-test fixture without a mesh.
+		return g.queryCapabilityContext(ctx, key)
+	}
+	g.trustMu.Lock()
+	seen, ok := g.guardSeen[string(key)]
+	g.trustMu.Unlock()
+	if ok && time.Since(seen) < guardRecheck {
+		if c, ok := g.knownRelay(key); ok {
+			return c, nil
+		}
+	}
+	c, err := g.requestCapabilityContext(ctx, key)
+	g.trustMu.Lock()
+	if g.guardSeen == nil {
+		g.guardSeen = make(map[string]time.Time)
+	}
+	if err == nil {
+		g.guardSeen[string(key)] = time.Now()
+	} else {
+		delete(g.guardSeen, string(key))
+		if bytes.Equal(g.guard, key) {
+			g.guard = nil
+		}
+	}
+	g.trustMu.Unlock()
+	return c, err
 }
 
 // buildPath selects an n-hop path: a trusted guard, then hops chosen only

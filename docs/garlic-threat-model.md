@@ -650,8 +650,25 @@ user, including site hosts (and their uptime). Nodes now default to hidden
 mode (`Mode: "client"`): they answer no capability or gossip requests, relay
 nothing, hold no onion key and store no directory records, and are
 indistinguishable from nodes that do not run Garlic. Only relays
-(`Mode: "relay"`) are public. Sites can only be hosted by hidden nodes
-unless `AllowServicesOnRelay` is set.
+(`Mode: "relay"`) are public. Sites can be hosted by any node; on a relay
+their uptime can be compared with the relay's public uptime, so hidden
+hosts are recommended.
+
+**Linking sites of one host.** Each hosted site signs its descriptor, TLS
+certificate and relay registration with its own key, derived with HKDF from
+`SigningPrivateKey` and the site's `Name`; the unnamed default site uses the
+signing key itself. Sites therefore share no public key material.
+Certificates carry fixed validity dates (no start time), and each site
+publishes on its own randomly jittered schedule with its own relay and
+circuits. What remains is availability correlation: sites of one host are
+up and down together. Anyone holding `SigningPrivateKey` can link all of
+the host's sites.
+
+**Guard liveness.** A trusted guard is confirmed by a direct capability
+answer at least once a minute; one that stops answering (offline, or
+switched to hidden mode) is skipped in favour of another trusted peer even
+though its signed RelayInfo is still valid. Guards are still only ever
+trusted peers.
 
 **First hop.** The first hop of every circuit is a trusted peer
 (`TrustedPeers`, by Yggdrasil node key) and the chosen guard is kept while

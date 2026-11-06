@@ -70,7 +70,6 @@ type GarlicConfig struct {
 	TrustedPeers         []string              `comment:"Yggdrasil public keys (hex, the \"Public key\" from yggdrasilctl getSelf)\nof Garlic relays you trust. The first hop of every circuit is always\none of these, and in client mode they are the only nodes contacted\ndirectly. They must be reachable over the mesh (Peers). Required:\nwithout a trusted relay no circuits can be built."`
 	TrustOutboundPeers   bool                  `comment:"Also trust every connected outbound peer from your Peers list (not\nmulticast/LAN or inbound peers) as a first hop. Default false."`
 	OnionKeyRotation     string                `comment:"Relay mode: how often the onion key is replaced (Go duration). The\nprevious key is wiped after a grace period, so recorded traffic\ncannot be decrypted later even if this machine is compromised."`
-	AllowServicesOnRelay bool                  `comment:"Allow hosting Services in relay mode. Off by default because a\npublic relay's uptime would be linkable to the site's uptime."`
 	BootstrapPeers       []string              `json:",omitempty" comment:"Deprecated alias of TrustedPeers."`
 	SigningPrivateKey    KeyBytes              `json:",omitempty" comment:"This node's Garlic site signing key (Ed25519 seed, 32 bytes). Your\nhash.domains.yggg addresses are derived from it - keep it to keep\nyour domains. Independent of your main Yggdrasil key. Onion keys\nare separate, ephemeral and never stored."`
 	PathLength           int                   `comment:"Number of hops for circuits this node originates."`
@@ -95,6 +94,7 @@ type GarlicProxyConfig struct {
 }
 
 type GarlicServiceConfig struct {
+	Name         string `json:",omitempty" comment:"Any label, e.g. \"blog\". Each site signs with its own key derived\nfrom SigningPrivateKey and this name, so sites cannot be linked to\neach other or to this node. Keep the name to keep the domain; the\nsite without a name uses the node's default domain."`
 	ServiceID    string `comment:"Optional hex service ID; empty selects the default hash domain."`
 	LocalAddr    string `comment:"Existing local HTTP server, e.g. 127.0.0.1:8080 (virtual port 80)."`
 	TLSLocalAddr string `json:",omitempty" comment:"Optional existing HTTPS server for virtual port 443. Browser certificate\nvalidation is independent of the Garlic transport's authenticated TLS."`

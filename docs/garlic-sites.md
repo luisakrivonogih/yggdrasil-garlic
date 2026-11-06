@@ -17,9 +17,12 @@ keep it to retain the domain. Onion (X25519) keys are ephemeral, rotate in
 memory and are never stored. Never replace the signing key with the main
 Yggdrasil private key.
 
-A site must be hosted by a hidden node (`Mode: "client"`, the default):
-relays refuse `Services` unless `AllowServicesOnRelay` is set, because a
-publicly listed relay's uptime would be linkable to the site.
+Any node can host sites, several at once. Each `Services` entry with its
+own `Name` signs with its own key (HKDF of `SigningPrivateKey` and the
+name), so sites of one node cannot be linked to each other or to the node
+cryptographically. Hosting on a hidden node (`Mode: "client"`, the default)
+is the strongest option: a relay's uptime is publicly observable and can be
+compared with the sites' uptime, and the daemon warns about this.
 
 Run your HTTP server on, for example, `127.0.0.1:8080`. In the existing
 `Garlic` block, preserve its keys and other defaults and set:

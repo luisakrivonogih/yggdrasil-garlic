@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	mrand "math/rand/v2"
 	"net"
 	"slices"
 	"sync"
@@ -25,7 +26,10 @@ import (
 // ServiceConfig exposes only explicitly configured virtual ports. An HTTP
 // service requires just LocalAddr, e.g. 127.0.0.1:8080. TLSLocalAddr is an
 // optional existing HTTPS backend for browser CONNECT requests on port 443.
+// Name selects the site's own signing key (see SiteSigningKey): sites with
+// different names cannot be linked to each other.
 type ServiceConfig struct {
+	Name         string `json:",omitempty"`
 	ServiceID    string
 	LocalAddr    string
 	TLSLocalAddr string `json:",omitempty"`
@@ -34,6 +38,7 @@ type ServiceConfig struct {
 type HostedService struct {
 	g                    *Garlic
 	cfg                  ServiceConfig
+	key                  ed25519.PrivateKey // this site's own signing key
 	gid                  GID
 	serviceID            []byte
 	pc                   *sitePacketConn
@@ -55,30 +60,40 @@ func siteQUICConfig() *quic.Config {
 	return &quic.Config{HandshakeIdleTimeout: 15 * time.Second, MaxIdleTimeout: 60 * time.Second, KeepAlivePeriod: 15 * time.Second, MaxIncomingStreams: 4, MaxIncomingUniStreams: -1, InitialPacketSize: 1200, DisablePathMTUDiscovery: true, MaxStreamReceiveWindow: 256 << 10, MaxConnectionReceiveWindow: 1 << 20}
 }
 
-func siteCertificate(id *Identity, domain string) (tls.Certificate, error) {
+// siteCertificate is the site's self-signed TLS certificate. Clients check
+// its key against the GID, not its dates; the dates are fixed so that a
+// certificate does not reveal when the node started (which would link all
+// sites started together).
+var (
+	siteCertNotBefore = time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
+	siteCertNotAfter  = time.Date(9999, time.December, 31, 23, 59, 59, 0, time.UTC)
+)
+
+func siteCertificate(key ed25519.PrivateKey, domain string) (tls.Certificate, error) {
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
 		return tls.Certificate{}, err
 	}
-	now := time.Now()
-	template := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: domain}, DNSNames: []string{domain}, NotBefore: now.Add(-time.Minute), NotAfter: now.AddDate(1, 0, 0), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
-	der, err := x509.CreateCertificate(rand.Reader, template, template, id.SigningPublicKey, id.SigningPrivateKey)
+	template := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: domain}, DNSNames: []string{domain}, NotBefore: siteCertNotBefore, NotAfter: siteCertNotAfter, KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, key.Public(), key)
 	if err != nil {
 		return tls.Certificate{}, err
 	}
-	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: id.SigningPrivateKey}, nil
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}, nil
 }
 
+// StartService hosts a site in any mode. In relay mode the site is still
+// reached only through circuits and its descriptor names a different relay,
+// but a public relay's uptime is visible to everyone and can be compared
+// with the site's (see docs/garlic-quickstart.md).
 func (g *Garlic) StartService(cfg ServiceConfig) (*HostedService, error) {
-	if !g.cfg.Hidden && !g.cfg.AllowServicesOnRelay {
-		return nil, ErrServiceOnRelay
-	}
 	serviceID, err := hex.DecodeString(cfg.ServiceID)
 	if err != nil {
 		return nil, fmt.Errorf("invalid serviceId: %w", err)
 	}
-	if len(serviceID) > maxServiceIDSize {
-		return nil, ErrServiceIDTooLarge
+	key, err := SiteSigningKey(g.identity.SigningPrivateKey, cfg.Name, serviceID)
+	if err != nil {
+		return nil, err
 	}
 	if cfg.LocalAddr == "" && cfg.TLSLocalAddr == "" {
 		return nil, errors.New("garlic: a service needs LocalAddr or TLSLocalAddr")
@@ -90,13 +105,13 @@ func (g *Garlic) StartService(cfg ServiceConfig) (*HostedService, error) {
 			}
 		}
 	}
-	gid := ComputeGID(g.identity.SigningPublicKey, serviceID)
-	cert, err := siteCertificate(g.identity, gid.Domain())
+	gid := ComputeGID(key.Public().(ed25519.PublicKey), serviceID)
+	cert, err := siteCertificate(key, gid.Domain())
 	if err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(g.sites.ctx)
-	h := &HostedService{g: g, cfg: cfg, gid: gid, serviceID: serviceID, ctx: ctx, cancel: cancel, ready: make(chan struct{}), wake: make(chan struct{}, 1), connections: make(chan struct{}, 64), streams: make(chan struct{}, 128), route: &siteRoute{g: g}}
+	h := &HostedService{g: g, cfg: cfg, key: key, gid: gid, serviceID: serviceID, ctx: ctx, cancel: cancel, ready: make(chan struct{}), wake: make(chan struct{}, 1), connections: make(chan struct{}, 64), streams: make(chan struct{}, 128), route: &siteRoute{g: g}}
 	h.pc, err = newSitePacketConn(g, gid, true, h.route)
 	if err != nil {
 		cancel()
@@ -127,7 +142,23 @@ func (h *HostedService) Domain() string         { return h.gid.Domain() }
 func (h *HostedService) Ready() <-chan struct{} { return h.ready }
 func (h *HostedService) LastError() error       { h.mu.Lock(); defer h.mu.Unlock(); return h.lastError }
 
+// siteJitter spreads d over [d/2, 3d/2). A node hosting several sites must
+// not publish them in lockstep: matching publication times would link the
+// sites to each other.
+func siteJitter(d time.Duration) time.Duration {
+	return d/2 + time.Duration(mrand.Int64N(int64(d)+1))
+}
+
 func (h *HostedService) maintain() {
+	// Sites started together (at boot) begin publishing at independent
+	// random moments.
+	start := time.NewTimer(time.Duration(mrand.Int64N(int64(5 * time.Second))))
+	select {
+	case <-h.ctx.Done():
+		start.Stop()
+		return
+	case <-start.C:
+	}
 	for {
 		err := h.refresh()
 		h.mu.Lock()
@@ -139,9 +170,9 @@ func (h *HostedService) maintain() {
 		if err == nil {
 			h.readyOnce.Do(func() { close(h.ready) })
 		}
-		delay := max(250*time.Millisecond, min(45*time.Second, h.route.rotationInterval()/2))
+		delay := siteJitter(max(250*time.Millisecond, min(45*time.Second, h.route.rotationInterval()/2)))
 		if err != nil {
-			delay = 2 * time.Second
+			delay = siteJitter(2 * time.Second)
 		}
 		t := time.NewTimer(delay)
 		select {
@@ -229,11 +260,11 @@ func (h *HostedService) refresh() error {
 		h.route.gateway = nil
 		return ErrUnknownRelay
 	}
-	d, err := SignServiceDescriptor(h.g.identity.SigningPublicKey, h.g.identity.SigningPrivateKey, h.serviceID, []IntroPoint{{NodeKey: h.route.gateway, RelayInfo: relayInfo}}, now, now+180)
+	d, err := SignServiceDescriptor(h.key.Public().(ed25519.PublicKey), h.key, h.serviceID, []IntroPoint{{NodeKey: h.route.gateway, RelayInfo: relayInfo}}, now, now+180)
 	if err != nil {
 		return err
 	}
-	if err := h.g.sites.register(ctx, h.route.circuit, h.route.gateway, d); err != nil {
+	if err := h.g.sites.register(ctx, h.route.circuit, h.route.gateway, d, h.key); err != nil {
 		h.g.CloseCircuit(h.route.circuit)
 		h.route.circuit = CircuitID{}
 		h.route.current.Store(nil)
@@ -335,6 +366,7 @@ func (h *HostedService) Close() error {
 }
 
 type ServiceStatus struct {
+	Name          string `json:"name,omitempty"`
 	Domain        string `json:"domain"`
 	Published     bool   `json:"published"`
 	LastPublished string `json:"lastPublished,omitempty"`
@@ -351,7 +383,7 @@ func (g *Garlic) HostedServices() []ServiceStatus {
 	status := make([]ServiceStatus, 0, len(hosts))
 	for _, h := range hosts {
 		h.mu.Lock()
-		s := ServiceStatus{Domain: h.Domain(), Published: !h.lastPublished.IsZero() && time.Since(h.lastPublished) < 180*time.Second}
+		s := ServiceStatus{Name: h.cfg.Name, Domain: h.Domain(), Published: !h.lastPublished.IsZero() && time.Since(h.lastPublished) < 180*time.Second}
 		if !h.lastPublished.IsZero() {
 			s.LastPublished = h.lastPublished.UTC().Format(time.RFC3339)
 		}

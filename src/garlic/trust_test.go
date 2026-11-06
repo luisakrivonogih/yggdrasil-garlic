@@ -3,6 +3,8 @@ package garlic
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"net/url"
@@ -75,8 +77,78 @@ func TestSelfRelayInfoSignedByNodeKeyAndHiddenModeSilent(t *testing.T) {
 	if _, err := h.StartService(ServiceConfig{LocalAddr: "127.0.0.1:1"}); err != nil {
 		t.Fatalf("hidden node refused to host a site: %v", err)
 	}
-	if _, err := g.StartService(ServiceConfig{LocalAddr: "127.0.0.1:1"}); !errors.Is(err, ErrServiceOnRelay) {
-		t.Fatalf("relay agreed to host a site: %v", err)
+	if _, err := g.StartService(ServiceConfig{LocalAddr: "127.0.0.1:1"}); err != nil {
+		t.Fatalf("relay refused to host a site: %v", err)
+	}
+}
+
+// Sites of one node must share no visible key material: each has its own
+// signing key, stable for its name, unrelated to the node's other sites.
+func TestSiteKeysAreIndependentPerSite(t *testing.T) {
+	id, _ := NewIdentity()
+	def, err := SiteSigningKey(id.SigningPrivateKey, "", nil)
+	if err != nil || !bytes.Equal(def, id.SigningPrivateKey) {
+		t.Fatal("the unnamed default site must keep the node's default domain")
+	}
+	blog, _ := SiteSigningKey(id.SigningPrivateKey, "blog", nil)
+	shop, _ := SiteSigningKey(id.SigningPrivateKey, "shop", nil)
+	blogAgain, _ := SiteSigningKey(id.SigningPrivateKey, "blog", nil)
+	withID, _ := SiteSigningKey(id.SigningPrivateKey, "blog", []byte{1})
+	keys := [][]byte{id.SigningPublicKey, blog.Public().(ed25519.PublicKey), shop.Public().(ed25519.PublicKey), withID.Public().(ed25519.PublicKey)}
+	for i := range keys {
+		for j := i + 1; j < len(keys); j++ {
+			if bytes.Equal(keys[i], keys[j]) {
+				t.Fatalf("sites %d and %d share a signing key", i, j)
+			}
+		}
+	}
+	if !bytes.Equal(blog, blogAgain) {
+		t.Fatal("a site's key (and so its domain) changed for the same name")
+	}
+	other, _ := NewIdentity()
+	if otherBlog, _ := SiteSigningKey(other.SigningPrivateKey, "blog", nil); bytes.Equal(otherBlog, blog) {
+		t.Fatal("two nodes got the same key for the same site name")
+	}
+	if _, err := SiteSigningKey(id.SigningPrivateKey, strings.Repeat("x", MaxSiteNameSize+1), nil); !errors.Is(err, ErrSiteNameTooLong) {
+		t.Fatalf("overlong name accepted: %v", err)
+	}
+}
+
+// Two sites hosted by one node expose different keys in their certificates
+// and domains, and certificates carry no start time.
+func TestHostedSitesDoNotShareKeysOrStartTime(t *testing.T) {
+	c := newLinkedCoreForAutoCircuitTest(t)
+	defer c.Stop()
+	id, _ := NewIdentity()
+	g := New(c, id, DefaultConfig(), NewStaticRendezvous())
+	defer g.Close()
+	a, err := g.StartService(ServiceConfig{Name: "a", LocalAddr: "127.0.0.1:1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := g.StartService(ServiceConfig{Name: "b", LocalAddr: "127.0.0.1:2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Domain() == b.Domain() || bytes.Equal(a.key, b.key) || bytes.Equal(a.key, id.SigningPrivateKey) {
+		t.Fatal("named sites share a key or domain with each other or with the node")
+	}
+	if gid, _ := g.SiteGID("a", nil); gid.Domain() != a.Domain() {
+		t.Fatal("SiteGID disagrees with the hosted site's domain")
+	}
+	cert, err := siteCertificate(a.key, a.Domain())
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !parsed.NotBefore.Equal(siteCertNotBefore) || !parsed.NotAfter.Equal(siteCertNotAfter) {
+		t.Fatal("site certificate reveals when it was created")
+	}
+	if !bytes.Equal(parsed.PublicKey.(ed25519.PublicKey), a.key.Public().(ed25519.PublicKey)) {
+		t.Fatal("certificate is not signed by the site's own key")
 	}
 }
 

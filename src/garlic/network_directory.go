@@ -405,9 +405,8 @@ func (d *NetworkRendezvous) Publish(gid GID, record *ServiceDescriptor) error {
 	var storeErr error
 	for _, peer := range w.peers {
 		if bytes.Equal(peer, d.g.core.PublicKey()) {
-			if d.store(gid, record) {
-				stored++
-			}
+			// A relay never stores the records of sites it hosts itself:
+			// they would show up in its directory before anywhere else.
 			continue
 		}
 		res, err := d.rpc(ctx, peer, gid, record)

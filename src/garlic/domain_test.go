@@ -2,6 +2,7 @@ package garlic
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"errors"
 	"strings"
 	"testing"
@@ -81,7 +82,14 @@ func TestLookupDomainVerifiesDirectoryRecords(t *testing.T) {
 	publisher := &Garlic{identity: id, rendezvous: rv}
 	client := &Garlic{rendezvous: rv}
 	serviceID := []byte("web")
-	gid := ComputeGID(id.SigningPublicKey, serviceID)
+	// A site with a ServiceID signs with its own key derived from the
+	// node's signing key (SiteSigningKey).
+	siteKey, err := SiteSigningKey(id.SigningPrivateKey, "", serviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	site := &Identity{SigningPublicKey: siteKey.Public().(ed25519.PublicKey), SigningPrivateKey: siteKey}
+	gid := ComputeGID(site.SigningPublicKey, serviceID)
 	if _, err := client.LookupDomain(gid.Domain()); !errors.Is(err, ErrGIDNotFound) {
 		t.Fatalf("unpublished domain: got %v", err)
 	}
@@ -104,9 +112,9 @@ func TestLookupDomainVerifiesDirectoryRecords(t *testing.T) {
 		want      error
 	}{
 		{"forged", attacker, now, now + 3600, false, ErrDescriptorGIDMismatch},
-		{"tampered", id, now, now + 3600, true, ErrInvalidDescriptorSignature},
-		{"expired", id, now - descriptorClockSkew - 100, now - descriptorClockSkew - 1, false, ErrDescriptorExpired},
-		{"future", id, now + 3600, now + 7200, false, ErrDescriptorNotYetValid},
+		{"tampered", site, now, now + 3600, true, ErrInvalidDescriptorSignature},
+		{"expired", site, now - descriptorClockSkew - 100, now - descriptorClockSkew - 1, false, ErrDescriptorExpired},
+		{"future", site, now + 3600, now + 7200, false, ErrDescriptorNotYetValid},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d, err := SignServiceDescriptor(tc.identity.SigningPublicKey, tc.identity.SigningPrivateKey, serviceID, points, tc.published, tc.expires)

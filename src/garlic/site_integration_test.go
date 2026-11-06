@@ -134,6 +134,24 @@ func TestSiteBrowserAcrossDistributedMesh(t *testing.T) {
 	case <-time.After(40 * time.Second):
 		t.Fatalf("publication not ready: %v", service.LastError())
 	}
+	// A second, named site on the same hidden host: its own key and domain.
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("second site"))
+	}))
+	defer second.Close()
+	u2, _ := url.Parse(second.URL)
+	service2, err := overlays[0].StartService(garlic.ServiceConfig{Name: "second", LocalAddr: u2.Host})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-service2.Ready():
+	case <-time.After(40 * time.Second):
+		t.Fatalf("second site not ready: %v", service2.LastError())
+	}
+	if service2.Domain() == service.Domain() {
+		t.Fatal("two sites of one node got the same domain")
+	}
 	// This hidden client joins only after publication. Its directory starts
 	// empty, and it knows only one trusted relay, never the service
 	// descriptor.
@@ -174,6 +192,15 @@ func TestSiteBrowserAcrossDistributedMesh(t *testing.T) {
 		if cookie.Domain != "" {
 			t.Fatalf("cookie not host-only: %v", cookie)
 		}
+	}
+	response, err = browser.Get("http://" + service2.Domain() + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err = io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil || string(body) != "second site" {
+		t.Fatalf("second site: %v %q", err, body)
 	}
 	response, err = browser.Get("http://" + service.Domain() + "/rotate")
 	if err != nil {
