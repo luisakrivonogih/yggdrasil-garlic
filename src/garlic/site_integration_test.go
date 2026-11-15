@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -280,7 +282,59 @@ func TestSiteBrowserAcrossDistributedMesh(t *testing.T) {
 	if conn != nil {
 		conn.Close()
 	}
-	if err == nil {
-		t.Fatal("unconfigured virtual port 443 was accepted")
+	if !errors.Is(err, garlic.ErrPortNotOffered) {
+		t.Fatalf("unconfigured virtual port 443: got %v, want ErrPortNotOffered", err)
+	}
+	if _, err := client.DialService(ctx, service.Domain(), 0); !errors.Is(err, garlic.ErrInvalidPort) {
+		t.Fatalf("port 0: got %v, want ErrInvalidPort", err)
+	}
+
+	// A raw binary (non-HTTP) protocol on arbitrary ports: the host only
+	// maps virtual ports to backends.
+	echo, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echo.Close()
+	go func() {
+		for {
+			c, err := echo.Accept()
+			if err != nil {
+				return
+			}
+			go func() { defer c.Close(); _, _ = io.Copy(c, c) }()
+		}
+	}()
+	dead, _ := net.Listen("tcp", "127.0.0.1:0")
+	deadAddr := dead.Addr().String()
+	dead.Close()
+	raw, err := overlays[0].StartService(garlic.ServiceConfig{Name: "raw", Ports: map[uint16]string{7000: echo.Addr().String(), 9000: deadAddr}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-raw.Ready():
+	case <-time.After(40 * time.Second):
+		t.Fatalf("raw service not ready: %v", raw.LastError())
+	}
+	conn, err = client.DialService(ctx, raw.Domain(), 7000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := make([]byte, 5000)
+	for i := range msg {
+		msg[i] = byte(i * 7)
+	}
+	go func() { _, _ = conn.Write(msg) }()
+	got := make([]byte, len(msg))
+	if _, err := io.ReadFull(conn, got); err != nil || !bytes.Equal(got, msg) {
+		t.Fatalf("raw echo mismatch: %v", err)
+	}
+	conn.Close()
+	if _, err := client.DialService(ctx, raw.Domain(), 80); !errors.Is(err, garlic.ErrPortNotOffered) {
+		t.Fatalf("unoffered port: got %v, want ErrPortNotOffered", err)
+	}
+	if _, err := client.DialService(ctx, raw.Domain(), 9000); !errors.Is(err, garlic.ErrBackendUnavailable) {
+		t.Fatalf("dead backend: got %v, want ErrBackendUnavailable", err)
 	}
 }

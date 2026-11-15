@@ -416,22 +416,27 @@ func main() {
 				if err != nil {
 					panic(err)
 				}
-				logger.Printf("Garlic browser proxy: http://%s (PAC: http://%s/proxy.pac)", n.garlicProxy.Addr(), n.garlicProxy.Addr())
+				logger.Printf("Garlic local proxy (SOCKS5 and HTTP): %s (PAC: http://%s/proxy.pac)", n.garlicProxy.Addr(), n.garlicProxy.Addr())
 			}
 			if len(cfg.Garlic.Services) > 0 && !hidden {
 				logger.Warnf("This public relay also hosts sites. Each site is still reached only through circuits and cannot be linked to this node cryptographically, but anyone can see when a relay is online and compare that with when the sites are. For stronger anonymity host sites on a node in Mode: client.")
 			}
 			for _, service := range cfg.Garlic.Services {
-				host, err := n.garlic.StartService(garlic.ServiceConfig{Name: service.Name, ServiceID: service.ServiceID, LocalAddr: service.LocalAddr, TLSLocalAddr: service.TLSLocalAddr})
+				ports, err := service.VirtualPorts()
 				if err != nil {
-					logger.Errorf("Garlic website not started: %v", err)
+					logger.Errorf("Garlic service %q not started: %v", service.Name, err)
 					continue
 				}
-				logger.Printf("Garlic website starting: http://%s/", host.Domain())
+				host, err := n.garlic.StartService(garlic.ServiceConfig{Name: service.Name, ServiceID: service.ServiceID, LocalAddr: service.LocalAddr, TLSLocalAddr: service.TLSLocalAddr, Ports: ports})
+				if err != nil {
+					logger.Errorf("Garlic service not started: %v", err)
+					continue
+				}
+				logger.Printf("Garlic service starting: %s", host.Domain())
 				go func() {
 					select {
 					case <-host.Ready():
-						logger.Printf("Garlic website published: http://%s/", host.Domain())
+						logger.Printf("Garlic service published: %s", host.Domain())
 					case <-ctx.Done():
 					}
 				}()

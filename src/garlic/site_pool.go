@@ -35,7 +35,16 @@ const (
 	maxSitePools    = 256
 )
 
-var errSiteBackend = errors.New("garlic: service backend unavailable")
+// Typed DialService errors, so proxies can answer with a precise code.
+var (
+	// ErrPortNotOffered: the site does not offer the requested virtual port.
+	ErrPortNotOffered = errors.New("garlic: the site does not offer this port")
+	// ErrBackendUnavailable: the site offers the port but its backend refused
+	// or did not answer (or the host reported another failure).
+	ErrBackendUnavailable = errors.New("garlic: service backend unavailable")
+	// ErrInvalidPort: the virtual port is 0.
+	ErrInvalidPort = errors.New("garlic: invalid virtual port")
+)
 
 type sitePool struct {
 	g       *Garlic
@@ -83,8 +92,8 @@ func (r *siteRouter) pool(gid GID) *sitePool {
 // DialService authenticates the site's end-to-end TLS key against its GID,
 // then opens a reliable stream to an explicitly hosted virtual port.
 func (g *Garlic) DialService(ctx context.Context, domain string, port uint16) (net.Conn, error) {
-	if port != 80 && port != 443 {
-		return nil, errors.New("garlic: unsupported virtual port")
+	if port == 0 {
+		return nil, ErrInvalidPort
 	}
 	gid, err := ParseDomain(domain)
 	if err != nil {
@@ -106,7 +115,7 @@ func (p *sitePool) dial(ctx context.Context, port uint16) (net.Conn, error) {
 			return s, nil
 		}
 		last = err
-		if errors.Is(err, errSiteBackend) || ctx.Err() != nil {
+		if errors.Is(err, ErrBackendUnavailable) || errors.Is(err, ErrPortNotOffered) || ctx.Err() != nil {
 			break
 		}
 		// The connection is broken (its circuit died, the relay went
@@ -427,8 +436,14 @@ func (c *pooledConn) open(ctx context.Context, port uint16) (net.Conn, error) {
 	if _, err = stream.Write(header[:]); err == nil {
 		var status [1]byte
 		_, err = io.ReadFull(stream, status[:])
-		if err == nil && status[0] != 1 {
-			err = errSiteBackend
+		if err == nil {
+			switch status[0] {
+			case streamOK:
+			case streamPortNotOffered:
+				err = ErrPortNotOffered
+			default:
+				err = ErrBackendUnavailable
+			}
 		}
 	}
 	if err != nil {

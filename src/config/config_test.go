@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"encoding/hex"
+	"github.com/hjson/hjson-go/v4"
 	"strings"
 	"testing"
 )
@@ -160,5 +161,40 @@ func TestDashboardConfigDefaults(t *testing.T) {
 	}
 	if cfg.Dashboard.Path != "" {
 		t.Errorf("Dashboard.Path = %q, want empty (tries conventional install paths)", cfg.Dashboard.Path)
+	}
+}
+
+func TestGarlicServicePorts(t *testing.T) {
+	ok := GarlicServiceConfig{Ports: map[string]string{"80": "127.0.0.1:8080", "22": "127.0.0.1:22", "9000": "[::1]:9000"}}
+	ports, err := ok.VirtualPorts()
+	if err != nil || len(ports) != 3 || ports[22] != "127.0.0.1:22" || ports[9000] != "[::1]:9000" {
+		t.Fatalf("VirtualPorts = %v, %v", ports, err)
+	}
+	for name, p := range map[string]map[string]string{
+		"zero":      {"0": "127.0.0.1:1"},
+		"too large": {"65536": "127.0.0.1:1"},
+		"not a num": {"http": "127.0.0.1:1"},
+		"duplicate": {"80": "127.0.0.1:1", "080": "127.0.0.1:2"},
+	} {
+		if _, err := (GarlicServiceConfig{Ports: p}).VirtualPorts(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+func TestGarlicServicePortsRoundTrip(t *testing.T) {
+	cfg := GenerateConfig()
+	cfg.Garlic.Services = []GarlicServiceConfig{{Name: "x", Ports: map[string]string{"22": "127.0.0.1:22", "7000": "127.0.0.1:7000"}, LocalAddr: "127.0.0.1:8080"}}
+	bs, err := hjson.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back NodeConfig
+	if _, err := back.ReadFrom(bytes.NewReader(bs)); err != nil {
+		t.Fatal(err)
+	}
+	s := back.Garlic.Services[0]
+	if s.Ports["22"] != "127.0.0.1:22" || s.Ports["7000"] != "127.0.0.1:7000" || s.LocalAddr != "127.0.0.1:8080" {
+		t.Fatalf("round trip lost ports: %+v", s)
 	}
 }

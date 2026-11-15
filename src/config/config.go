@@ -30,6 +30,8 @@ import (
 	"io"
 	"math/big"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/hjson/hjson-go/v4"
@@ -67,8 +69,8 @@ type NodeConfig struct {
 // Overlay (see docs/garlic-architecture.md). The zero value (Enabled:
 // false) means vanilla Yggdrasil behavior.
 type GarlicConfig struct {
-	Proxy                GarlicProxyConfig     `comment:"Local browser proxy for .domains.yggg sites. Uses Garlic circuits;\nnever performs public DNS resolution for these names."`
-	Services             []GarlicServiceConfig `comment:"Hidden websites hosted by this node. Empty means client/relay only.\nEach service forwards virtual port 80 to LocalAddr, and optionally\n443 to TLSLocalAddr, through an authenticated encrypted stream."`
+	Proxy                GarlicProxyConfig     `comment:"Local proxy (SOCKS5 and HTTP) for applications reaching .domains.yggg\nservices. Uses Garlic circuits;\nnever performs public DNS resolution for these names."`
+	Services             []GarlicServiceConfig `comment:"Hidden services hosted by this node. Empty means client/relay only.\nEach service forwards its listed virtual ports (Ports) to local TCP\nservers through an authenticated encrypted stream."`
 	Enabled              bool                  `comment:"Enables the experimental Garlic Routing Overlay. Default is false."`
 	Mode                 string                `comment:"\"client\" (default, hidden): this node never answers Garlic queries,\nnever relays and is invisible as a Garlic node to everyone except its\nTrustedPeers. Use this on desktops and on nodes hosting sites.\n\"relay\": public Garlic relay for servers - advertises itself, relays\ncircuits and stores directory records. See docs/garlic-quickstart.md."`
 	TrustedPeers         []string              `comment:"Yggdrasil public keys (hex, the \"Public key\" from yggdrasilctl getSelf)\nof Garlic relays you trust. The first hop of every circuit is always\none of these, and in client mode they are the only nodes contacted\ndirectly. They must be reachable over the mesh (Peers). Required:\nwithout a trusted relay no circuits can be built."`
@@ -100,10 +102,29 @@ type GarlicProxyConfig struct {
 }
 
 type GarlicServiceConfig struct {
-	Name         string `json:",omitempty" comment:"Any label, e.g. \"blog\". Each site signs with its own key derived\nfrom SigningPrivateKey and this name, so sites cannot be linked to\neach other or to this node. Keep the name to keep the domain; the\nsite without a name uses the node's default domain."`
-	ServiceID    string `comment:"Optional hex service ID; empty selects the default hash domain."`
-	LocalAddr    string `comment:"Existing local HTTP server, e.g. 127.0.0.1:8080 (virtual port 80)."`
-	TLSLocalAddr string `json:",omitempty" comment:"Optional existing HTTPS server for virtual port 443. Browser certificate\nvalidation is independent of the Garlic transport's authenticated TLS."`
+	Name         string            `json:",omitempty" comment:"Any label, e.g. \"blog\". Each site signs with its own key derived\nfrom SigningPrivateKey and this name, so sites cannot be linked to\neach other or to this node. Keep the name to keep the domain; the\nsite without a name uses the node's default domain."`
+	ServiceID    string            `comment:"Optional hex service ID; empty selects the default hash domain."`
+	Ports        map[string]string `json:",omitempty" comment:"Virtual TCP ports this site offers, each mapped to the local address\nserving it, e.g. {\"80\": \"127.0.0.1:8080\", \"22\": \"127.0.0.1:22\"}.\nOnly the listed ports are reachable; the protocol is up to the\napplication. Port 0 and duplicates are errors."`
+	LocalAddr    string            `json:",omitempty" comment:"Deprecated synonym of port 80 in Ports, e.g. 127.0.0.1:8080."`
+	TLSLocalAddr string            `json:",omitempty" comment:"Deprecated synonym of port 443 in Ports."`
+}
+
+// VirtualPorts parses Ports into numeric virtual ports. It rejects keys that
+// are not a number in 1-65535 and keys naming the same port twice (e.g.
+// "80" and "080").
+func (s GarlicServiceConfig) VirtualPorts() (map[uint16]string, error) {
+	out := make(map[uint16]string, len(s.Ports))
+	for key, addr := range s.Ports {
+		n, err := strconv.ParseUint(strings.TrimSpace(key), 10, 16)
+		if err != nil || n == 0 {
+			return nil, fmt.Errorf("invalid Garlic service port %q: must be a number in 1-65535", key)
+		}
+		if _, dup := out[uint16(n)]; dup {
+			return nil, fmt.Errorf("Garlic service port %d is listed twice", n)
+		}
+		out[uint16(n)] = addr
+	}
+	return out, nil
 }
 
 type GarlicPaddingConfig struct {

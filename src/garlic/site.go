@@ -23,21 +23,64 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
-// ServiceConfig exposes only explicitly configured virtual ports. An HTTP
-// service requires just LocalAddr, e.g. 127.0.0.1:8080. TLSLocalAddr is an
-// optional existing HTTPS backend for browser CONNECT requests on port 443.
-// Name selects the site's own signing key (see SiteSigningKey): sites with
-// different names cannot be linked to each other.
+// ServiceConfig exposes only explicitly configured virtual ports. Ports maps
+// a virtual TCP port (1-65535) to the local backend address serving it, e.g.
+// {80: "127.0.0.1:8080", 22: "127.0.0.1:22"}; the host knows nothing about
+// the protocol spoken over a port. LocalAddr and TLSLocalAddr are older
+// spellings of ports 80 and 443. Name selects the site's own signing key
+// (see SiteSigningKey): sites with different names cannot be linked to each
+// other.
 type ServiceConfig struct {
 	Name         string `json:",omitempty"`
 	ServiceID    string
-	LocalAddr    string
-	TLSLocalAddr string `json:",omitempty"`
+	LocalAddr    string            `json:",omitempty"`
+	TLSLocalAddr string            `json:",omitempty"`
+	Ports        map[uint16]string `json:",omitempty"`
+}
+
+// PortTable returns the virtual port to backend address table of cfg: Ports
+// plus the LocalAddr/TLSLocalAddr synonyms. It fails on port 0, an invalid
+// backend address, a synonym that disagrees with Ports, or an empty table.
+func (cfg ServiceConfig) PortTable() (map[uint16]string, error) {
+	table := make(map[uint16]string, len(cfg.Ports)+2)
+	add := func(port uint16, addr, what string) error {
+		if port == 0 {
+			return errors.New("garlic: virtual port 0 is not allowed")
+		}
+		if _, _, err := net.SplitHostPort(addr); err != nil {
+			return fmt.Errorf("invalid local service address for %s: %w", what, err)
+		}
+		if old, ok := table[port]; ok && old != addr {
+			return fmt.Errorf("garlic: virtual port %d configured twice with different addresses (%s, %s)", port, old, addr)
+		}
+		table[port] = addr
+		return nil
+	}
+	for port, addr := range cfg.Ports {
+		if err := add(port, addr, fmt.Sprintf("port %d", port)); err != nil {
+			return nil, err
+		}
+	}
+	if cfg.LocalAddr != "" {
+		if err := add(80, cfg.LocalAddr, "LocalAddr"); err != nil {
+			return nil, err
+		}
+	}
+	if cfg.TLSLocalAddr != "" {
+		if err := add(443, cfg.TLSLocalAddr, "TLSLocalAddr"); err != nil {
+			return nil, err
+		}
+	}
+	if len(table) == 0 {
+		return nil, errors.New("garlic: a service needs at least one port in Ports (or LocalAddr/TLSLocalAddr)")
+	}
+	return table, nil
 }
 
 type HostedService struct {
 	g                    *Garlic
 	cfg                  ServiceConfig
+	ports                map[uint16]string  // virtual port -> backend address
 	key                  ed25519.PrivateKey // this site's own signing key
 	gid                  GID
 	serviceID            []byte
@@ -103,15 +146,9 @@ func (g *Garlic) StartService(cfg ServiceConfig) (*HostedService, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cfg.LocalAddr == "" && cfg.TLSLocalAddr == "" {
-		return nil, errors.New("garlic: a service needs LocalAddr or TLSLocalAddr")
-	}
-	for _, addr := range []string{cfg.LocalAddr, cfg.TLSLocalAddr} {
-		if addr != "" {
-			if _, _, err := net.SplitHostPort(addr); err != nil {
-				return nil, fmt.Errorf("invalid local service address: %w", err)
-			}
-		}
+	ports, err := cfg.PortTable()
+	if err != nil {
+		return nil, err
 	}
 	gid := g.siteGIDFor(key.Public().(ed25519.PublicKey), serviceID)
 	cert, err := siteCertificate(key, gid.Domain())
@@ -119,7 +156,7 @@ func (g *Garlic) StartService(cfg ServiceConfig) (*HostedService, error) {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(g.sites.ctx)
-	h := &HostedService{g: g, cfg: cfg, key: key, gid: gid, serviceID: serviceID, ctx: ctx, cancel: cancel, ready: make(chan struct{}), wake: make(chan struct{}, 1), connections: make(chan struct{}, 64), streams: make(chan struct{}, 128)}
+	h := &HostedService{g: g, cfg: cfg, ports: ports, key: key, gid: gid, serviceID: serviceID, ctx: ctx, cancel: cancel, ready: make(chan struct{}), wake: make(chan struct{}, 1), connections: make(chan struct{}, 64), streams: make(chan struct{}, 128)}
 	for range siteIntroPoints {
 		h.routes = append(h.routes, &siteRoute{g: g})
 	}
@@ -400,6 +437,16 @@ func (h *HostedService) accept() {
 	}
 }
 
+// Status byte a host sends after reading the 2-byte virtual port. A client
+// that does not know a code treats every value other than streamOK as a
+// failure, so new codes stay compatible with older clients.
+const (
+	streamFailed             byte = 0 // other failure
+	streamOK                 byte = 1
+	streamPortNotOffered     byte = 2 // the site does not offer this port
+	streamBackendUnavailable byte = 3 // the backend refused or did not answer
+)
+
 func (h *HostedService) serveStream(conn *quic.Conn, stream *quic.Stream) {
 	defer stream.Close()
 	defer stream.CancelRead(0)
@@ -408,28 +455,22 @@ func (h *HostedService) serveStream(conn *quic.Conn, stream *quic.Stream) {
 	if _, err := io.ReadFull(stream, port[:]); err != nil {
 		return
 	}
-	addr := ""
-	switch binary.BigEndian.Uint16(port[:]) {
-	case 80:
-		addr = h.cfg.LocalAddr
-	case 443:
-		addr = h.cfg.TLSLocalAddr
-	}
+	addr := h.ports[binary.BigEndian.Uint16(port[:])]
 	if addr == "" {
-		_, _ = stream.Write([]byte{0})
+		_, _ = stream.Write([]byte{streamPortNotOffered})
 		return
 	}
 	dialer := net.Dialer{Timeout: 5 * time.Second}
 	backend, err := dialer.DialContext(h.ctx, "tcp", addr)
 	if err != nil {
-		_, _ = stream.Write([]byte{0})
+		_, _ = stream.Write([]byte{streamBackendUnavailable})
 		return
 	}
 	defer backend.Close()
 	stop := context.AfterFunc(conn.Context(), func() { backend.Close() })
 	defer stop()
 	_ = stream.SetReadDeadline(time.Time{})
-	if _, err := stream.Write([]byte{1}); err != nil {
+	if _, err := stream.Write([]byte{streamOK}); err != nil {
 		return
 	}
 	done := make(chan struct{})
