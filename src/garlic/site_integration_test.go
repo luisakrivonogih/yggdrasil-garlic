@@ -337,4 +337,29 @@ func TestSiteBrowserAcrossDistributedMesh(t *testing.T) {
 	if _, err := client.DialService(ctx, raw.Domain(), 9000); !errors.Is(err, garlic.ErrBackendUnavailable) {
 		t.Fatalf("dead backend: got %v, want ErrBackendUnavailable", err)
 	}
+
+	// The same raw protocol through the local SOCKS5 proxy (shared port).
+	sc, err := net.Dial("tcp", proxy.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sc.Close()
+	_ = sc.SetDeadline(time.Now().Add(60 * time.Second))
+	sc.Write([]byte{5, 1, 0})
+	var sel [2]byte
+	if _, err := io.ReadFull(sc, sel[:]); err != nil || sel != [2]byte{5, 0} {
+		t.Fatalf("socks method: %v %v", sel, err)
+	}
+	name := raw.Domain()
+	sreq := append([]byte{5, 1, 0, 3, byte(len(name))}, name...)
+	sreq = append(sreq, 0x1b, 0x58) // port 7000
+	sc.Write(sreq)
+	var srep [10]byte
+	if _, err := io.ReadFull(sc, srep[:]); err != nil || srep[1] != 0 {
+		t.Fatalf("socks connect: %v %v", srep, err)
+	}
+	go func() { _, _ = sc.Write(msg) }()
+	if _, err := io.ReadFull(sc, got); err != nil || !bytes.Equal(got, msg) {
+		t.Fatalf("raw echo over SOCKS5 mismatch: %v", err)
+	}
 }
