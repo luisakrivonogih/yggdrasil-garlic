@@ -38,6 +38,12 @@ exactly as before. The first hop of every circuit is one of your
 and never contacted directly; relay onion keys rotate hourly and are wiped.
 Operator guide (Russian): [docs/garlic-quickstart.md](docs/garlic-quickstart.md).
 
+Note on upgrades: configs normalised by older builds carry an explicit
+`Enabled: false` in the Garlic block, which overrides the default. The
+package postinst detects this and re-enables the overlay during upgrade;
+to keep a node out of the overlay, set `Enabled: false` in the Garlic
+block after upgrading.
+
 Start here:
 
 - [docs/garlic-quickstart.md](docs/garlic-quickstart.md) - install, trusted peers, hosting a .yggg site

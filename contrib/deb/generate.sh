@@ -115,6 +115,18 @@ then
   echo "Normalising and updating /etc/yggdrasil/yggdrasil.conf"
   if /usr/bin/yggdrasil -useconf -normaliseconf < "$backup_path" > /etc/yggdrasil/yggdrasil.conf.new && [ -s /etc/yggdrasil/yggdrasil.conf.new ]; then
     mv /etc/yggdrasil/yggdrasil.conf.new /etc/yggdrasil/yggdrasil.conf
+
+    # Configs normalised by older builds carry an explicit
+    # "Enabled: false" in the Garlic block, and an explicit value
+    # overrides this package's enabled-by-default. Upgrade the flag
+    # in place so existing nodes come up with the overlay on. The
+    # 4-space indent matches only the top-level Garlic.Enabled -
+    # nested blocks (Proxy, Padding, Jitter) are indented deeper
+    # and keep their own values.
+    if sed -n '/^  Garlic: {/,/^  }/p' /etc/yggdrasil/yggdrasil.conf | grep -q "^    Enabled: false"; then
+      sed -i "/^  Garlic: {/,/^  }/ s/^    Enabled: false/    Enabled: true/" /etc/yggdrasil/yggdrasil.conf
+      echo "Garlic: the config had the overlay disabled by an older config template - enabled it (set Enabled: false in the Garlic block to keep it off)"
+    fi
   else
     rm -f /etc/yggdrasil/yggdrasil.conf.new
     echo "Could not normalise the configuration - keeping it unchanged"
