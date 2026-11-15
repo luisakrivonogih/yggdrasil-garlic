@@ -335,3 +335,20 @@ func TestHTTPAbsoluteURIOnNonDefaultPort(t *testing.T) {
 		t.Fatalf("default port Host %q", host)
 	}
 }
+
+// A client that sends EOF and then waits for the reply (nc, ncat) must still
+// get it: the end of its input is a half-close, not a full close.
+func TestTunnelHalfCloseKeepsReply(t *testing.T) {
+	p := testProxy(t, &fakeDialer{echo: startEcho(t)})
+	c, code := socksConnect(t, p.Addr().String(), 3, []byte(testDomain()), 7000, 1)
+	if code != 0 {
+		t.Fatal(code)
+	}
+	defer c.Close()
+	c.Write([]byte("last words"))
+	c.(*net.TCPConn).CloseWrite()
+	got, err := io.ReadAll(c)
+	if err != nil || string(got) != "last words" {
+		t.Fatalf("reply after half-close: %q %v", got, err)
+	}
+}

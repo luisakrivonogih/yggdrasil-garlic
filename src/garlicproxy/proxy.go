@@ -176,13 +176,33 @@ func (p *Proxy) track(c net.Conn) bool {
 func (p *Proxy) untrack(c net.Conn) { p.mu.Lock(); delete(p.connections, c); p.mu.Unlock() }
 
 // relay copies both ways between a client and a service until both
-// directions end. clientIn may hold bytes the client already sent.
+// directions end. clientIn may hold bytes the client already sent. An end of
+// input in one direction is passed on as a half-close, so a reply still in
+// flight is not lost (clients such as nc send EOF and then wait for it).
 func relay(client net.Conn, clientIn io.Reader, site net.Conn) {
 	finished := make(chan struct{})
-	go func() { _, _ = io.Copy(client, site); client.Close(); close(finished) }()
+	go func() {
+		_, _ = io.Copy(client, site)
+		if !closeWrite(client) {
+			client.Close()
+		}
+		close(finished)
+	}()
 	_, _ = io.Copy(site, clientIn)
-	site.Close()
+	if !closeWrite(site) {
+		site.Close()
+	}
 	<-finished
+	client.Close()
+	site.Close()
+}
+
+// closeWrite shuts down only the sending direction of c, if it can.
+func closeWrite(c net.Conn) bool {
+	if cw, ok := c.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite() == nil
+	}
+	return false
 }
 
 // dialStatus maps a DialService error to an HTTP status.
@@ -262,6 +282,13 @@ type peekConn struct {
 }
 
 func (c *peekConn) Read(b []byte) (int, error) { return c.r.Read(b) }
+
+func (c *peekConn) CloseWrite() error {
+	if !closeWrite(c.Conn) {
+		return errors.New("half-close unsupported")
+	}
+	return nil
+}
 
 // muxListener feeds the HTTP server the connections that are not SOCKS5.
 type muxListener struct{ p *Proxy }

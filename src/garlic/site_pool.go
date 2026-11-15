@@ -466,6 +466,11 @@ type siteConn struct {
 
 func (s *siteConn) LocalAddr() net.Addr  { return s.c.pc.LocalAddr() }
 func (s *siteConn) RemoteAddr() net.Addr { return flowAddr(s.c.pc.id) }
+
+// CloseWrite ends the sending direction only (a half-close): the host sees
+// EOF while the reply may still arrive.
+func (s *siteConn) CloseWrite() error { return s.Stream.Close() }
+
 func (s *siteConn) Close() error {
 	s.once.Do(func() {
 		s.Stream.CancelRead(0)
