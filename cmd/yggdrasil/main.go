@@ -308,10 +308,10 @@ func main() {
 		}
 	}
 
-	// Set up the Garlic Routing Overlay (experimental, optional). When
-	// cfg.Garlic.Enabled is false (the default), this block does nothing
-	// and n.garlic stays nil - behavior is identical to a build with no
-	// Garlic support at all. See docs/garlic-architecture.md.
+	// Set up the Garlic Routing Overlay (experimental, enabled by default).
+	// When cfg.Garlic.Enabled is false, this block does nothing and n.garlic
+	// stays nil - behavior is identical to a build with no Garlic support
+	// at all. See docs/garlic-architecture.md.
 	{
 		if cfg.Garlic.Enabled {
 			// Onion (X25519) keys are always ephemeral and rotate in

@@ -31,10 +31,10 @@ func TestConfigReadFromEmpty(t *testing.T) {
 	}
 }
 
-func TestGarlicConfigDefaultsDisabled(t *testing.T) {
+func TestGarlicConfigDefaultsEnabled(t *testing.T) {
 	cfg := GenerateConfig()
-	if cfg.Garlic.Enabled {
-		t.Error("Garlic.Enabled = true by default, want false")
+	if !cfg.Garlic.Enabled {
+		t.Error("Garlic.Enabled = false by default, want true")
 	}
 }
 
@@ -79,16 +79,27 @@ func TestGarlicConfigPaddingAndJitterDefaults(t *testing.T) {
 	}
 }
 
-// A config file written before the Garlic block existed must keep
-// working, and must not silently enable an experimental feature it
-// never mentioned.
-func TestGarlicConfigAbsentFromInputStaysDisabled(t *testing.T) {
+// A config file written before the Garlic block existed inherits the
+// defaults (Garlic enabled, client mode) via the GenerateConfig base that
+// ReadFrom parses on top of. An explicit Enabled: false must still win.
+func TestGarlicConfigAbsentFromInputInheritsDefault(t *testing.T) {
 	var cfg NodeConfig
 	if _, err := cfg.ReadFrom(bytes.NewReader([]byte("{}"))); err != nil {
 		t.Fatalf("ReadFrom returned error: %v", err)
 	}
-	if cfg.Garlic.Enabled {
-		t.Error("Garlic.Enabled = true for a config that never mentions garlic, want false")
+	if !cfg.Garlic.Enabled {
+		t.Error("Garlic.Enabled = false for a config that never mentions garlic, want the enabled default")
+	}
+	if cfg.Garlic.Mode != "client" {
+		t.Errorf("Garlic.Mode = %q for a config that never mentions garlic, want the client default", cfg.Garlic.Mode)
+	}
+
+	var off NodeConfig
+	if _, err := off.ReadFrom(bytes.NewReader([]byte("{ Garlic: { Enabled: false } }"))); err != nil {
+		t.Fatalf("ReadFrom returned error: %v", err)
+	}
+	if off.Garlic.Enabled {
+		t.Error("explicit Garlic.Enabled: false was overridden by the default")
 	}
 }
 

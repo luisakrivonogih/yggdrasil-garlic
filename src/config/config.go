@@ -61,7 +61,7 @@ type NodeConfig struct {
 	LogLookups          bool                       `json:",omitempty"`
 	NodeInfoPrivacy     bool                       `comment:"By default, nodeinfo contains some defaults including the platform,\narchitecture and Yggdrasil version. These can help when surveying\nthe network and diagnosing network routing problems. Enabling\nnodeinfo privacy prevents this, so that only items specified in\n\"NodeInfo\" are sent back if specified."`
 	NodeInfo            map[string]any             `comment:"Optional nodeinfo. This must be a { \"key\": \"value\", ... } map\nor set as null. This is entirely optional but, if set, is visible\nto the whole network on request."`
-	Garlic              GarlicConfig               `comment:"Configuration for the experimental Garlic Routing Overlay, an optional\nprivacy-enhanced routing layer built on top of Yggdrasil - see\ndocs/garlic-architecture.md. When Enabled is false (the default),\nbehavior is identical to a node with no Garlic support at all."`
+	Garlic              GarlicConfig               `comment:"Configuration for the experimental Garlic Routing Overlay, an optional\nprivacy-enhanced routing layer built on top of Yggdrasil - see\ndocs/garlic-architecture.md. Enabled by default in client (hidden)\nmode; set Enabled to false and behavior is identical to a node with\nno Garlic support at all."`
 	Dashboard           DashboardConfig            `comment:"Configuration for the local operator dashboard - a web UI and\nread-only API showing this node's live status, traffic, peers, and\n(if enabled) Garlic circuits. Disabled by default. When enabled, the\nlistener should stay loopback-only - the dashboard and its API have\nno authentication of their own."`
 }
 
@@ -71,7 +71,7 @@ type NodeConfig struct {
 type GarlicConfig struct {
 	Proxy                GarlicProxyConfig     `comment:"Local proxy (SOCKS5 and HTTP) for applications reaching .domains.yggg\nservices. Uses Garlic circuits;\nnever performs public DNS resolution for these names."`
 	Services             []GarlicServiceConfig `comment:"Hidden services hosted by this node. Empty means client/relay only.\nEach service forwards its listed virtual ports (Ports) to local TCP\nservers through an authenticated encrypted stream."`
-	Enabled              bool                  `comment:"Enables the experimental Garlic Routing Overlay. Default is false."`
+	Enabled              bool                  `comment:"Enables the experimental Garlic Routing Overlay. Default is true\n(client/hidden mode). Set to false to run as a plain Yggdrasil node."`
 	Mode                 string                `comment:"\"client\" (default, hidden): this node never answers Garlic queries,\nnever relays and is invisible as a Garlic node to everyone except its\nTrustedPeers. Use this on desktops and on nodes hosting sites.\n\"relay\": public Garlic relay for servers - advertises itself, relays\ncircuits and stores directory records. See docs/garlic-quickstart.md."`
 	TrustedPeers         []string              `comment:"Yggdrasil public keys (hex, the \"Public key\" from yggdrasilctl getSelf)\nof Garlic relays you trust. The first hop of every circuit is always\none of these, and in client mode they are the only nodes contacted\ndirectly. They must be reachable over the mesh (Peers). Required:\nwithout a trusted relay no circuits can be built."`
 	TrustOutboundPeers   bool                  `comment:"Also trust every connected outbound peer from your Peers list (not\nmulticast/LAN or inbound peers) as a first hop. Default false."`
@@ -178,7 +178,7 @@ func GenerateConfig() *NodeConfig {
 	cfg.Garlic = GarlicConfig{
 		Proxy:              GarlicProxyConfig{Enabled: true, Listen: "127.0.0.1:4444"},
 		Services:           []GarlicServiceConfig{},
-		Enabled:            false,
+		Enabled:            true,
 		PathLength:         3,
 		CircuitLifetime:    "10m",
 		MaxCircuits:        1024,

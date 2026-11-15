@@ -12,18 +12,28 @@ connectivity - it also works over IPv4.
 
 ## Garlic Routing Overlay (experimental, this branch)
 
-This branch adds an experimental, optional privacy-enhanced routing layer on
+This branch adds an experimental privacy-enhanced routing layer on
 top of Yggdrasil: onion/garlic-style circuits, capability negotiation,
 per-hop packet-size and timing randomization, gossip-based peer discovery,
 topologically diverse hop selection, multipath circuits, and cover-traffic
-bundling. It is fully backward compatible - a node with `Garlic.Enabled:
-false` (the default) behaves exactly like vanilla Yggdrasil, and ordinary
-Yggdrasil nodes transparently carry Garlic traffic without needing to know
-it exists or upgrading anything.
+bundling. It is fully backward compatible - ordinary Yggdrasil nodes
+transparently carry Garlic traffic without needing to know it exists or
+upgrading anything.
 
-Nodes run in hidden mode by default (`Garlic.Mode: "client"`): they answer
-no Garlic queries and relay nothing, so they cannot be enumerated. Servers
-run `Mode: "relay"`. The first hop of every circuit is one of your
+**Garlic is enabled by default.** `Garlic.Enabled` defaults to `true`, for
+fresh installs (`-genconf`, `-autoconf`) and for existing configs alike: a
+config that never mentions the Garlic block inherits the default when it is
+loaded. Nodes run in hidden client mode (`Garlic.Mode: "client"`) by
+default: they answer no Garlic queries and relay nothing, so they cannot be
+enumerated. Servers should run `Mode: "relay"`. To opt out, set
+`Garlic.Enabled: false` in `yggdrasil.conf` - the node then behaves exactly
+like vanilla Yggdrasil.
+
+Enabling Garlic does not change normal Yggdrasil operation: with no
+`Garlic.TrustedPeers` configured the node simply logs a warning and builds
+no circuits until you add one (`yggdrasilctl addGarlicPeer
+key=<relay node key>`), while peering, tree routing and TUN traffic work
+exactly as before. The first hop of every circuit is one of your
 `Garlic.TrustedPeers`; other hops are chosen from signed relay information
 and never contacted directly; relay onion keys rotate hourly and are wiped.
 Operator guide (Russian): [docs/garlic-quickstart.md](docs/garlic-quickstart.md).
