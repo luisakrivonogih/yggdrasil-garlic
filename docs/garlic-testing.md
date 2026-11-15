@@ -268,3 +268,30 @@ go test ./src/garlic/... -run TestIntegrationSendGarlicThroughLegacyRelay -v   #
 go test ./src/garlic/... -run '^$' -bench . -benchmem        # performance numbers
 go test ./src/garlic/... -run '^$' -fuzz=FuzzEnvelopeUnmarshal -fuzztime=60s   # adversarial input, any Fuzz* target
 ```
+
+## Checking arbitrary ports through the local proxy
+
+Four nodes on 127.0.0.1 are enough: two relays (`Mode: "relay"`, one
+listening, the other peering to it), a service host and a client, both
+`Mode: "client"` with the first relay in `TrustedPeers`. In every config set
+`IfName: none`, `MulticastInterfaces: []`, `Garlic.PathLength: 1` and
+`Garlic.MinHopCount: 0`; give each node its own `AdminListen`, and give the
+client a proxy port other than 4444 (a system daemon may already use it).
+The host lists the ports it offers:
+
+```hjson
+Services: [{ Name: "raw", Ports: { "7000": "127.0.0.1:7000", "22": "127.0.0.1:2222" } }]
+```
+
+Wait for `Garlic service published: <hash>.domains.yggg` in the host log,
+then, with any TCP server behind the ports (an echo server on 7000):
+
+```sh
+printf 'hello\n' | ncat --proxy 127.0.0.1:<port> --proxy-type socks5 <hash>.domains.yggg 7000
+ssh -o ProxyCommand='nc -X 5 -x 127.0.0.1:<port> %h %p' user@<hash>.domains.yggg
+curl --socks5-hostname 127.0.0.1:<port> http://<hash>.domains.yggg:81/   # (5): port not offered
+curl --socks5-hostname 127.0.0.1:<port> http://example.com/              # (2): not allowed
+```
+
+Stop only the processes you started (keep their PIDs); do not use
+`pkill -f`, since a system-wide daemon may be running as root.

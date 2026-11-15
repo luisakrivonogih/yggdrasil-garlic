@@ -123,19 +123,25 @@ yggdrasilctl newGarlicDomains confirm=yes   # новый ключ, новые д
 2. В секции `Garlic` конфига перечислите сайты:
    ```hjson
    Services: [
-     { Name: "blog", ServiceID: "", LocalAddr: "127.0.0.1:8090" }
-     { Name: "shop", ServiceID: "", LocalAddr: "127.0.0.1:8091" }
+     { Name: "blog", ServiceID: "", Ports: { "80": "127.0.0.1:8090", "22": "127.0.0.1:22" } }
+     { Name: "shop", ServiceID: "", Ports: { "80": "127.0.0.1:8091" } }
    ]
    ```
+   Доступны только перечисленные порты (любой TCP-протокол, 1–65535); `LocalAddr`
+   остаётся устаревшим синонимом порта 80.
    (или при установке: `SITE_ADDR=127.0.0.1:8090 SITE_NAME=blog`; режим узла не меняется).
 3. Перезапустите Yggdrasil и проверьте:
    ```sh
    yggdrasilctl getGarlicServices            # домены, "published": true или последняя ошибка
    yggdrasilctl getGarlicDomain name=blog    # домен сайта, не публикуя его
    ```
-4. Открыть сайт: на любом узле с Garlic в браузере укажите прокси `127.0.0.1:4444`
-   (или PAC `http://127.0.0.1:4444/proxy.pac`) и откройте `http://<хеш>.domains.yggg/`.
-   Проверка: `curl --proxy http://127.0.0.1:4444 http://<хеш>.domains.yggg/`.
+4. Открыть сервис: на любом узле с Garlic локальный прокси `127.0.0.1:4444` понимает
+   и SOCKS5, и HTTP. Браузер: прокси `127.0.0.1:4444` (или PAC
+   `http://127.0.0.1:4444/proxy.pac`), адрес `http://<хеш>.domains.yggg/`.
+   Любое TCP-приложение — через SOCKS5 с передачей имени прокси:
+   `curl --socks5-hostname 127.0.0.1:4444 http://<хеш>.domains.yggg/`,
+   `ssh -o ProxyCommand='nc -X 5 -x 127.0.0.1:4444 %h %p' user@<хеш>.domains.yggg`.
+   Подробнее: [garlic-sites.md](garlic-sites.md).
 
 **Почему по сайту нельзя найти узел и связать сайты между собой.**
 - У каждого сайта свой ключ подписи, выведенный из `SigningPrivateKey` и `Name`

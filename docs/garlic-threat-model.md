@@ -642,10 +642,13 @@ Site packets use a separate 512 packets/second per-peer token bucket
 with a 1024-packet burst. These are resource controls, not a proof of
 resistance to sustained distributed flooding.
 
-The HTTP proxy accepts only loopback listeners and validated hash hosts;
-no unknown name is retried using public DNS or a direct TCP connection.
-Only fixed, operator-configured backend addresses on virtual ports 80/443
-can be reached. HTTP forwarding headers and cross-site Referer/Origin are
+The local proxy (SOCKS5 and HTTP on one port) accepts only loopback
+listeners and validated hash hosts; no unknown name is retried using public
+DNS or a direct TCP connection, and SOCKS5 IP literals are refused. Only
+fixed, operator-configured backend addresses on the ports listed in the
+service's `Ports` can be reached; any TCP protocol may run over them, and
+the host does not inspect it. SOCKS credentials are ignored (no circuit
+isolation). HTTP forwarding headers and cross-site Referer/Origin are
 removed; HTTP cookies become host-only because public browsers do not
 recognize `.domains.yggg` as a public suffix. HTTPS CONNECT is opaque and
 cannot enforce those HTTP header/cookie rules. The PAC sends ordinary

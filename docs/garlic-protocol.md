@@ -697,9 +697,24 @@ Flows expire after two minutes of inactivity.
 QUIC runs over these virtual datagrams with ALPN `yggg-site-v1`. Its TLS
 certificate must be signed by the descriptor's Ed25519 service key, be
 valid for the hash domain and pass certificate validity checks. A stream
-starts with a big-endian virtual port (80 or 443); the host replies 1
-after connecting to the configured backend, or 0 on refusal. Remaining
-bytes are a reliable full-duplex application stream.
+starts with a big-endian 2-byte virtual port (1-65535; port 0 is never
+sent). The host looks the port up in its table of explicitly offered ports
+(`Ports`) and replies with one status byte:
+
+| byte | meaning |
+|------|---------|
+| 1 | connected to the backend; the stream is now an application stream |
+| 0 | other failure |
+| 2 | the site does not offer this port |
+| 3 | the port is offered but the backend refused or did not answer |
+
+Remaining bytes after a 1 are a reliable full-duplex application stream; the
+host knows no application protocol, so any TCP protocol can be carried.
+A client that predates codes 2 and 3 treats every value other than 1 as a
+failure, and a client talking to a host that predates them sees only 0 or 1,
+so both directions stay compatible. `DialService` turns the codes into
+`ErrPortNotOffered` (2), `ErrBackendUnavailable` (3 and 0) and
+`ErrInvalidPort` (port 0, rejected before any network access).
 
 Directory queries are iterative XOR-nearest lookups with bounded fanout,
 signed records, up to three replicas, expiry and freshness enforcement.

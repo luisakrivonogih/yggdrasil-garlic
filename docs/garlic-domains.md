@@ -84,7 +84,7 @@ introduction points does not change it.
 
 The daemon uses the distributed `NetworkRendezvous`. Configured websites
 register a relay and automatically publish and refresh their signed records.
-The browser proxy resolves them over Garlic circuits and opens an
+The local proxy resolves them over Garlic circuits and opens an
 authenticated stream to the configured backend. The explicit
 `StaticRendezvous` implementation remains local and is used by isolated tests.
 Neither backend maps a domain to the hosting node's IPv6 address.
