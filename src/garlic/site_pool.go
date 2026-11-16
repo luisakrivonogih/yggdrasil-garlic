@@ -83,7 +83,7 @@ func (r *siteRouter) pool(gid GID) *sitePool {
 // DialService authenticates the site's end-to-end TLS key against its GID,
 // then opens a reliable stream to an explicitly hosted virtual port.
 func (g *Garlic) DialService(ctx context.Context, domain string, port uint16) (net.Conn, error) {
-	if port != 80 && port != 443 {
+	if port == 0 {
 		return nil, errors.New("garlic: unsupported virtual port")
 	}
 	gid, err := ParseDomain(domain)

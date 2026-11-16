@@ -422,7 +422,7 @@ func main() {
 				logger.Warnf("This public relay also hosts sites. Each site is still reached only through circuits and cannot be linked to this node cryptographically, but anyone can see when a relay is online and compare that with when the sites are. For stronger anonymity host sites on a node in Mode: client.")
 			}
 			for _, service := range cfg.Garlic.Services {
-				host, err := n.garlic.StartService(garlic.ServiceConfig{Name: service.Name, ServiceID: service.ServiceID, LocalAddr: service.LocalAddr, TLSLocalAddr: service.TLSLocalAddr})
+				host, err := n.garlic.StartService(garlic.ServiceConfig{Name: service.Name, ServiceID: service.ServiceID, LocalAddr: service.LocalAddr, TLSLocalAddr: service.TLSLocalAddr, Ports: service.Ports})
 				if err != nil {
 					logger.Errorf("Garlic website not started: %v", err)
 					continue

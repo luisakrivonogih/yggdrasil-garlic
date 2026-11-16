@@ -100,10 +100,11 @@ type GarlicProxyConfig struct {
 }
 
 type GarlicServiceConfig struct {
-	Name         string `json:",omitempty" comment:"Any label, e.g. \"blog\". Each site signs with its own key derived\nfrom SigningPrivateKey and this name, so sites cannot be linked to\neach other or to this node. Keep the name to keep the domain; the\nsite without a name uses the node's default domain."`
-	ServiceID    string `comment:"Optional hex service ID; empty selects the default hash domain."`
-	LocalAddr    string `comment:"Existing local HTTP server, e.g. 127.0.0.1:8080 (virtual port 80)."`
-	TLSLocalAddr string `json:",omitempty" comment:"Optional existing HTTPS server for virtual port 443. Browser certificate\nvalidation is independent of the Garlic transport's authenticated TLS."`
+	Name         string            `json:",omitempty" comment:"Any label, e.g. \"blog\". Each site signs with its own key derived\nfrom SigningPrivateKey and this name, so sites cannot be linked to\neach other or to this node. Keep the name to keep the domain; the\nsite without a name uses the node's default domain."`
+	ServiceID    string            `comment:"Optional hex service ID; empty selects the default hash domain."`
+	LocalAddr    string            `comment:"Existing local HTTP server, e.g. 127.0.0.1:8080 (virtual port 80)."`
+	TLSLocalAddr string            `json:",omitempty" comment:"Optional existing HTTPS server for virtual port 443. Browser certificate\nvalidation is independent of the Garlic transport's authenticated TLS."`
+	Ports        map[string]string `json:",omitempty" comment:"Other virtual ports, as {\"60\": \"127.0.0.1:6060\", \"2965\": \"127.0.0.1:8443\"}:\neach is a raw TCP stream to the local address (NXP uses 60, NXPS 2965)."`
 }
 
 type GarlicPaddingConfig struct {

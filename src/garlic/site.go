@@ -17,6 +17,7 @@ import (
 	mrand "math/rand/v2"
 	"net"
 	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -33,6 +34,8 @@ type ServiceConfig struct {
 	ServiceID    string
 	LocalAddr    string
 	TLSLocalAddr string `json:",omitempty"`
+	// Ports maps further virtual ports (decimal strings) to local TCP addresses.
+	Ports map[string]string `json:",omitempty"`
 }
 
 type HostedService struct {
@@ -103,10 +106,18 @@ func (g *Garlic) StartService(cfg ServiceConfig) (*HostedService, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cfg.LocalAddr == "" && cfg.TLSLocalAddr == "" {
-		return nil, errors.New("garlic: a service needs LocalAddr or TLSLocalAddr")
+	if cfg.LocalAddr == "" && cfg.TLSLocalAddr == "" && len(cfg.Ports) == 0 {
+		return nil, errors.New("garlic: a service needs LocalAddr, TLSLocalAddr or Ports")
 	}
-	for _, addr := range []string{cfg.LocalAddr, cfg.TLSLocalAddr} {
+	addrs := []string{cfg.LocalAddr, cfg.TLSLocalAddr}
+	for port, addr := range cfg.Ports {
+		n, err := strconv.ParseUint(port, 10, 16)
+		if err != nil || n == 0 {
+			return nil, fmt.Errorf("invalid virtual port %q", port)
+		}
+		addrs = append(addrs, addr)
+	}
+	for _, addr := range addrs {
 		if addr != "" {
 			if _, _, err := net.SplitHostPort(addr); err != nil {
 				return nil, fmt.Errorf("invalid local service address: %w", err)
@@ -409,11 +420,13 @@ func (h *HostedService) serveStream(conn *quic.Conn, stream *quic.Stream) {
 		return
 	}
 	addr := ""
-	switch binary.BigEndian.Uint16(port[:]) {
+	switch virtual := binary.BigEndian.Uint16(port[:]); virtual {
 	case 80:
 		addr = h.cfg.LocalAddr
 	case 443:
 		addr = h.cfg.TLSLocalAddr
+	default:
+		addr = h.cfg.Ports[strconv.Itoa(int(virtual))]
 	}
 	if addr == "" {
 		_, _ = stream.Write([]byte{0})

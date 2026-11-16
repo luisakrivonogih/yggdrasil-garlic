@@ -82,8 +82,8 @@ func Start(g *garlic.Garlic, listen string) (*Proxy, error) {
 		}
 		if r.Method == http.MethodConnect {
 			domain, port, err := parseTarget(r.Host, 443)
-			if err != nil || port != 443 {
-				http.Error(w, "CONNECT requires a .domains.yggg host on port 443", http.StatusForbidden)
+			if err != nil || port == 0 {
+				http.Error(w, "CONNECT requires a .domains.yggg host and a port", http.StatusForbidden)
 				return
 			}
 			conn, err := g.DialService(r.Context(), domain, port)
